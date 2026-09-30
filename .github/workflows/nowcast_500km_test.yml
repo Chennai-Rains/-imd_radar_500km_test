@@ -37,6 +37,24 @@ jobs:
         run: python test_500km_pipeline.py
 
       - name: Upload test map to a NEW file (does not touch the live storm_forecast_map.html)
+        # IMPORTANT: this deploys into the SAME remote folder the live
+        # IMD_Radar_Updates repo deploys storm_forecast_map.html into.
+        # FTP-Deploy-Action tracks what it's deployed via a small state
+        # file it stores IN that same remote folder
+        # (.ftp-deploy-sync-state.json by default) -- and it treats any
+        # file listed in that state but missing from this run's local-dir
+        # as something to DELETE from the server. Without a state-name of
+        # its own, this workflow would download the LIVE repo's state
+        # file (same default name, same folder), see storm_forecast_map
+        # .html listed in it, not have that file locally (this only ever
+        # builds storm_forecast_map_500km_test.html), and delete the live
+        # file -- which is exactly what happened the first time this ran:
+        # every dispatch of this workflow took the live map down until
+        # production's next cycle re-uploaded it.
+        #
+        # A distinct state-name keeps this workflow's own tracked-file
+        # list completely separate from the live repo's, so it only ever
+        # reasons about (and can only ever delete) files IT has uploaded.
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.FTP_HOST }}
@@ -46,8 +64,7 @@ jobs:
           protocol: ftps
           local-dir: ./output/
           server-dir: ${{ secrets.FTP_REMOTE_DIR }}
-          # Only this one file exists in local-dir (test_500km_pipeline.py
-          # writes exclusively to output/storm_forecast_map_500km_test.html),
-          # so this can never overwrite the live storm_forecast_map.html
-          # sitting in the same remote directory.
+          state-name: .ftp-deploy-sync-state-500km-test.json
+          # Never delete anything already sitting in that remote folder --
+          # this only ever adds/overwrites storm_forecast_map_500km_test.html.
           dangerous-clean-slate: false
