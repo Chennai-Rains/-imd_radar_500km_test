@@ -2,10 +2,20 @@
 
 A standalone preview build, forked out of
 [`Chennai-Rains/IMD_Radar_Updates`](https://github.com/Chennai-Rains/IMD_Radar_Updates),
-to try Karaikal on its real 500km-range PPZ product (`kkl_ppz`) instead of
-`kkl_maxz`'s ~250km range, while NIOT and Kochi stay on their normal
-products/ranges. This is a test product, not the live nowcast bot -- it
-never touches `storm_forecast_map.html` or any of that repo's state.
+to try Karaikal as a HYBRID of its two real IMD products: `kkl_maxz`
+(full resolution, 0-250km) for the inner disc, plus `kkl_ppz` (coarser,
+500km) for just the 250-500km ring `kkl_maxz`'s own image can't reach --
+so the map gets genuine 500km reach without giving up `kkl_maxz`'s sharper
+resolution close in. NIOT and Kochi stay on their normal products/ranges.
+This is a test product, not the live nowcast bot -- it never touches
+`storm_forecast_map.html` or any of that repo's state.
+
+`kkl_ppz`'s `PRODUCTS` entry carries `mask_within_km: 250.0`, which makes
+`decode_reflectivity()` NaN out its own inner 250km disc before it ever
+reaches the map or cell extraction -- so it only ever contributes the
+extended ring, never duplicates/competes with `kkl_maxz` in the region
+they both technically cover. On the page, that masked product shows up
+labeled "Karaikal Extended Radar".
 
 ## Running it
 
@@ -35,10 +45,12 @@ and variables → Actions** here too:
 
 ## Files
 
-- `nowcast_bot.py` -- full pipeline, copied from `IMD_Radar_Updates` as of
-  the Karaikal-timestamp-fix commit (`8cfef21`). `kkl_ppz`'s 500km
-  calibration was already in here; this repo is just what wires it into a
+- `nowcast_bot.py` -- full pipeline, kept in sync with `IMD_Radar_Updates`
+  (copy it over again after any live-repo change, same as this file's own
+  history shows). `kkl_ppz`'s 500km calibration and `mask_within_km`
+  support were already in here; this repo is just what wires them into a
   build.
 - `test_500km_pipeline.py` -- the entry point: overrides
-  `POLLED_PRODUCTS`, state/archive paths and the output filename, then
-  calls `nowcast_bot.run_pipeline()`.
+  `POLLED_PRODUCTS` (now `maxz`, `kkl_maxz`, `kkl_ppz`, `koc_maxz`),
+  state/archive paths and the output filename, then calls
+  `nowcast_bot.run_pipeline()`.

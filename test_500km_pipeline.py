@@ -1,10 +1,19 @@
-"""One-off test build: Karaikal extended to its real 500km IMD regional
-product (kkl_ppz -- already fully calibrated in nowcast_bot.py, just never
-wired into the live POLLED_PRODUCTS tuple) instead of the current 250km
-kkl_maxz, so it can be eyeballed on a real, uploaded page before deciding
-whether to make it the live map. NIOT stays on maxz (250km, unchanged) and
-Kochi stays on koc_maxz (250km, unchanged, per explicit instruction) --
-this is Karaikal-only.
+"""One-off test build: Karaikal shown as a HYBRID of its two real IMD
+products -- kkl_maxz (250km, full resolution) for the inner disc, and
+kkl_ppz (500km, coarser) for the 250-500km ring kkl_maxz's own image
+simply doesn't reach -- instead of the live map's kkl_maxz-only 250km.
+NIOT stays on maxz (250km, unchanged) and Kochi stays on koc_maxz (250km,
+unchanged, per explicit instruction) -- this is Karaikal-only.
+
+Both Karaikal products are polled every cycle. kkl_ppz's PRODUCTS entry
+carries mask_within_km=250.0, so decode_reflectivity() NaNs out its own
+inner 250km disc before this ever reaches the map or cell extraction --
+kkl_maxz alone covers that ground, at its own higher resolution, so
+there's no double-rendering or duplicate storm markers where the two
+products' coverage would otherwise overlap. See that field's comment in
+nowcast_bot.py for the full reasoning, and PRODUCT_STYLE's "Karaikal
+Extended Radar" label for how the masked (250-500km-only) product reads
+on the page.
 
 Deliberately NOT touching the live pipeline's state/archive/output paths
 or POLLED_PRODUCTS: everything below runs against its own isolated
@@ -16,23 +25,26 @@ fetched with real network access (the sandbox this was developed in can't
 reach mausam.imd.gov.in directly) and uploaded to a new filename on the
 same host, next to (not replacing) the live map.
 
-Why kkl_ppz specifically, not just bumping kkl_maxz's range_km number:
-range_km isn't a zoom/display setting -- IMD's own kkl_maxz image is
-pixel-calibrated to really only show real echo out to ~250km (that's the
-actual extent the source image renders at), so raising its declared
-range_km would only relax the "discard anything beyond the radar's own
-stated range as noise" safety filter without the image actually
-containing any real data further out -- exactly the false-positive
-pattern already fixed for Kochi earlier. kkl_ppz is a genuinely different
-IMD product: its own site_px/km_per_px calibration comment says it was
-"fit from 200/300/400/500km range-ring labels" on the real image, meaning
-it's really rendered at that range by IMD, not stretched by us.
+Why kkl_ppz specifically for the extension, not just bumping kkl_maxz's
+range_km number: range_km isn't a zoom/display setting -- IMD's own
+kkl_maxz image is pixel-calibrated to really only show real echo out to
+~250km (that's the actual extent the source image renders at), so
+raising its declared range_km would only relax the "discard anything
+beyond the radar's own stated range as noise" safety filter without the
+image actually containing any real data further out -- exactly the
+false-positive pattern already fixed for Kochi earlier. kkl_ppz is a
+genuinely different IMD product: its own site_px/km_per_px calibration
+comment says it was "fit from 200/300/400/500km range-ring labels" on the
+real image, meaning it's really rendered at that range by IMD, not
+stretched by us -- just at coarser resolution than kkl_maxz, which is
+exactly why it's only used for the ring kkl_maxz can't cover at all,
+rather than replacing kkl_maxz outright.
 """
 from pathlib import Path
 
 import nowcast_bot as nb
 
-TEST_PRODUCTS = ("maxz", "kkl_ppz", "koc_maxz")
+TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "koc_maxz")
 
 nb.POLLED_PRODUCTS = TEST_PRODUCTS
 nb.ARCHIVE_DIR = Path("archive_500km_test")
