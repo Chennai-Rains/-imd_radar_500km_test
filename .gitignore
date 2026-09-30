@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Test-only state/archive dirs (test_500km_pipeline.py points nowcast_bot.py
+# at these instead of the live repo's state/ and archive/ -- never persisted
+# between runs, each dispatch starts clean)
+archive_500km_test/
+state_500km_test/
+
+# Intermediate raster overlays regenerated fresh every run, and the built
+# output HTML -- output/ isn't committed, only uploaded via FTP
+_forecast_overlay_*.png
+output/
