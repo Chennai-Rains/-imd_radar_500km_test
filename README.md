@@ -17,21 +17,42 @@ extended ring, never duplicates/competes with `kkl_maxz` in the region
 they both technically cover. On the page, that masked product shows up
 labeled "Karaikal Extended Radar".
 
+Direction arrows are restricted to Karaikal cells within 250km of the
+site (`ARROW_MAX_RANGE_KM` in `nowcast_bot.py`) -- a cell out on the
+coarser 250-500km ring still gets a storm marker and tooltip, just no
+arrow, since a bearing off a coarse-pixel centroid track is noisier than
+it looks once drawn as a confident-looking arrow. Range-boundary circles
+are also drawn thin/faint on both this build and the live map, since with
+multiple radars' rings now often overlapping they were stacking into
+visual clutter over the actual reflectivity data.
+
 ## Running it
 
-The workflow (`.github/workflows/nowcast_500km_test.yml`) is
-**manual-dispatch only** for now -- trigger it from the Actions tab
-whenever you want a fresh build. It's not on a recurring schedule yet; once
-you're happy with a few days of manual checks, this can be switched to a
-15-minute cron-job.org pinger the same way the live bot's `nowcast.yml`
-is, with its own cron-job.org job pointed at this repo's
-`workflow_dispatch` API endpoint.
+The workflow (`.github/workflows/nowcast_500km_test.yml`) runs on a
+**15-minute cron-job.org pinger**, the same pattern as the live bot's
+`nowcast.yml` -- see "Setting up the 15-minute pinger" below.
+`workflow_dispatch` also still lets you trigger a run manually from the
+Actions tab any time.
 
-Each run builds `output/storm_forecast_map_500km_test.html` from scratch
-(its own isolated `state_500km_test/`/`archive_500km_test/`, never
-committed or reused between runs) and uploads just that one file over FTP
-to the same `plots.chennairains.com` directory the live bot uses --
-alongside, not instead of, `storm_forecast_map.html`.
+Each run builds `output/storm_forecast_map_500km_test.html` and uploads
+just that one file over FTP to the same `plots.chennairains.com`
+directory the live bot uses -- alongside, not instead of,
+`storm_forecast_map.html`. Its own `state_500km_test/`/
+`archive_500km_test/` ARE now committed back to this repo between runs
+(this build's own `git-auto-commit` step, isolated from the live repo's
+`state/`/`archive/`) -- needed so consecutive runs can see motion between
+cycles and draw direction arrows at all.
+
+### Setting up the 15-minute pinger
+
+Same setup as the live repo, pointed at this repo instead:
+
+1. On [cron-job.org](https://cron-job.org), create a new cron job.
+2. URL: `https://api.github.com/repos/Chennai-Rains/-imd_radar_500km_test/actions/workflows/nowcast_500km_test.yml/dispatches`
+3. Request method: `POST`.
+4. Headers: `Authorization: Bearer <a GitHub token with repo workflow-dispatch access>`, `Accept: application/vnd.github+json`.
+5. Request body: `{"ref":"main"}`.
+6. Schedule: every 15 minutes.
 
 ## Required repo secrets
 

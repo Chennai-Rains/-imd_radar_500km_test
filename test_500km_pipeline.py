@@ -25,6 +25,13 @@ fetched with real network access (the sandbox this was developed in can't
 reach mausam.imd.gov.in directly) and uploaded to a new filename on the
 same host, next to (not replacing) the live map.
 
+state_500km_test/ and archive_500km_test/ ARE now committed back to this
+repo between runs (nowcast_500km_test.yml has its own git-auto-commit
+step, isolated from the live repo's) -- needed so track_cells() has a
+previous cycle to diff against and can compute velocity_kmh; without that,
+no direction arrow could ever be drawn. Still completely separate from
+the live repo's state/archive, so there's no risk of collision there.
+
 Why kkl_ppz specifically for the extension, not just bumping kkl_maxz's
 range_km number: range_km isn't a zoom/display setting -- IMD's own
 kkl_maxz image is pixel-calibrated to really only show real echo out to

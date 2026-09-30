@@ -4,10 +4,14 @@ __pycache__/
 venv/
 
 # Test-only state/archive dirs (test_500km_pipeline.py points nowcast_bot.py
-# at these instead of the live repo's state/ and archive/ -- never persisted
-# between runs, each dispatch starts clean)
-archive_500km_test/
-state_500km_test/
+# at these instead of the live repo's state/ and archive/). These USED to be
+# gitignored/never-persisted, on the assumption this was a one-off preview
+# build -- but that meant track_cells() never had a previous cycle to diff
+# against on any run, so velocity_kmh was always None and no direction arrow
+# could ever be drawn, regardless of the arrow-drawing code itself. Now that
+# this runs repeatedly (cron-job.org, 15 min), these ARE committed back each
+# run, same as the live repo's state/ and archive/, so consecutive runs can
+# actually see motion between cycles.
 
 # Intermediate raster overlays regenerated fresh every run, and the built
 # output HTML -- output/ isn't committed, only uploaded via FTP

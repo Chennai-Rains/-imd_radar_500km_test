@@ -1,17 +1,22 @@
-name: One-off 500km Karaikal test build
+name: 500km Karaikal test build
 
 on:
-  # Manual only -- this is a one-time (or occasional, re-run-as-needed)
-  # preview build, not a recurring job. No schedule, no external pinger.
+  # Same pattern as the live repo's nowcast.yml: an external cron-job.org
+  # pinger calls this workflow's workflow_dispatch API endpoint every
+  # 15 minutes (see README for setup). workflow_dispatch also lets you
+  # trigger a run manually from the Actions tab any time.
   workflow_dispatch: {}
 
-# Deliberately NOT `permissions: contents: write` and NOT committing
-# anything back to the repo -- this is a throwaway preview build. Its own
-# archive/state live in isolated test-only directories (see
-# test_500km_pipeline.py) that are never persisted between runs; each
-# dispatch starts from a clean slate and re-fetches fresh frames. The only
-# side effect outside this job's own throwaway runner is the single
-# uploaded HTML file.
+# Only one run at a time, same reasoning as the live repo: cheap insurance
+# against two runs racing to commit/push state_500km_test/archive_500km_test
+# at once if a run ever takes longer than expected.
+concurrency:
+  group: nowcast-500km-test-pipeline
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # needed so the workflow can commit updated state_500km_test/ and archive_500km_test/ back to the repo
+
 jobs:
   build-test-map:
     runs-on: ubuntu-latest
@@ -21,6 +26,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          # Explicit `main`, not the default -- see the live repo's
+          # nowcast.yml for why (workflow_dispatch's default ref resolves
+          # to main's tip at DISPATCH time, not execution time, which
+          # matters once runs can queue behind each other).
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,6 +46,35 @@ jobs:
       - name: Run one-off test pipeline (Karaikal on kkl_ppz/500km, NIOT + Kochi unchanged)
         run: python test_500km_pipeline.py
 
+      - name: Rebase onto latest main before committing
+        # Same reasoning as the live repo's nowcast.yml -- see that file's
+        # comment on this step for the full story (a manual push landing
+        # mid-run, or another run's state commit, shouldn't cost this
+        # run's upload).
+        run: |
+          git fetch origin main
+          if ! git rebase origin/main --autostash; then
+            echo "Rebase failed/conflicted -- aborting to a clean state so the commit+upload steps still run this cycle."
+            git rebase --abort || true
+            git stash pop || true
+          fi
+        continue-on-error: true
+
+      - name: Commit updated tracking state + frame archive
+        # Needed for direction arrows: track_cells() compares this run's
+        # cells against the PREVIOUS run's (state_500km_test/prev_cells.json)
+        # to compute velocity_kmh -- without persisting these between runs,
+        # every run looks like the first one ever, velocity_kmh is always
+        # None, and no arrow can ever be drawn no matter what the
+        # arrow-drawing code does.
+        uses: stefanzweifel/git-auto-commit-action@v5
+        continue-on-error: true
+        with:
+          commit_message: "Update 500km test tracking state"
+          file_pattern: "state_500km_test/ archive_500km_test/"
+          commit_user_name: "nowcast-bot"
+          commit_user_email: "actions@users.noreply.github.com"
+
       - name: Upload test map to a NEW file (does not touch the live storm_forecast_map.html)
         # IMPORTANT: this deploys into the SAME remote folder the live
         # IMD_Radar_Updates repo deploys storm_forecast_map.html into.
@@ -43,18 +82,12 @@ jobs:
         # file it stores IN that same remote folder
         # (.ftp-deploy-sync-state.json by default) -- and it treats any
         # file listed in that state but missing from this run's local-dir
-        # as something to DELETE from the server. Without a state-name of
-        # its own, this workflow would download the LIVE repo's state
-        # file (same default name, same folder), see storm_forecast_map
-        # .html listed in it, not have that file locally (this only ever
-        # builds storm_forecast_map_500km_test.html), and delete the live
-        # file -- which is exactly what happened the first time this ran:
-        # every dispatch of this workflow took the live map down until
-        # production's next cycle re-uploaded it.
-        #
-        # A distinct state-name keeps this workflow's own tracked-file
-        # list completely separate from the live repo's, so it only ever
-        # reasons about (and can only ever delete) files IT has uploaded.
+        # as something to DELETE from the server. A distinct state-name
+        # keeps this workflow's own tracked-file list completely separate
+        # from the live repo's, so it only ever reasons about (and can
+        # only ever delete) files IT has uploaded. See git history for
+        # what happened the one time this wasn't set.
+        if: ${{ !cancelled() }}
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.FTP_HOST }}
