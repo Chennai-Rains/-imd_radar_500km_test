@@ -2298,17 +2298,22 @@ def build_autorefresh_script(interval_minutes: int = AUTOREFRESH_MINUTES) -> str
     return f"setTimeout(function() {{ window.location.reload(); }}, {interval_ms});"
 
 
-def build_cell_zoom_declutter_script(map_var: str, registry: list[tuple[str, float]]) -> str:
-    """Thins out cell markers by ZOOM LEVEL the same way OSM/Google Maps
-    declutters place labels -- fewer, only the most significant ones
-    visible zoomed out over a wide area, progressively more revealed as
-    you zoom into a smaller area -- requested directly after a wide-area
-    view (multiple radars, many small cells) read as too busy/cluttered.
-    "Significant" here is the cell's own real detected area in km^2 (the
-    same area_km2 already driving its marker radius -- see that comment a
-    few lines up), a reasonable stand-in for "how much this matters to a
-    reader scanning the whole map" the same way a city's population
-    decides whether it's labeled at a given map zoom.
+def build_cell_zoom_declutter_script(map_var: str, registry: list[tuple[str, float, str]]) -> str:
+    """Thins out cell markers AND their direction arrows by ZOOM LEVEL the
+    same way OSM/Google Maps declutters place labels -- fewer, only the
+    most significant ones visible zoomed out over a wide area,
+    progressively more revealed as you zoom into a smaller area --
+    requested directly after a wide-area view (multiple radars, many
+    small cells) read as too busy/cluttered, then again to extend the
+    same treatment to the arrows. "Significant" here is the cell's own
+    real detected area in km^2 (the same area_km2 already driving its
+    marker radius -- see that comment a few lines up), a reasonable
+    stand-in for "how much this matters to a reader scanning the whole
+    map" the same way a city's population decides whether it's labeled at
+    a given map zoom. An arrow entry carries its OWN cell's area_km2, not
+    a separately-computed score, specifically so it declutters in lock
+    step with its own circle -- never one visible without the other,
+    which would just read as a rendering bug.
 
     Deliberately a flat lookup table of (max zoom, min area_km2 to show)
     tiers rather than a continuous formula -- easier to reason about and
@@ -2323,18 +2328,21 @@ def build_cell_zoom_declutter_script(map_var: str, registry: list[tuple[str, flo
     last matching row wins), so zoom 12 and up always shows every cell
     regardless of size.
 
-    Hides rather than removes a marker outside its tier (opacity/
-    fillOpacity to 0 via Leaflet's setStyle) -- cheaper than re-adding/
-    removing layers on every zoom change, and the marker's popup still
-    works if a reader somehow clicks through an invisible one, which is a
-    fine trade for how rarely that'll happen.
+    Hides rather than removes a layer outside its tier -- cheaper than
+    re-adding/removing layers on every zoom change, and a hidden layer's
+    popup/tooltip still technically works if a reader somehow clicks
+    through an invisible one, a fine trade for how rarely that'll happen.
+    A circle (Leaflet Path) and a direction-arrow Marker don't share a
+    visibility API, so each entry's "kind" picks the right one: a
+    circle's opacity/fillOpacity via setStyle, a marker's single opacity
+    via setOpacity (markers have no separate fill).
 
     Returns BARE JavaScript (no <script> tags) for the same reason
     build_autorefresh_script's docstring explains -- added the same way,
     via m.get_root().script.add_child(...)."""
     if not registry:
         return ""
-    entries = ",".join(f"{{m:{name},a:{area:.3f}}}" for name, area in registry)
+    entries = ",".join(f'{{m:{name},a:{area:.3f},k:"{kind}"}}' for name, area, kind in registry)
     # (max_zoom_for_this_tier, min_area_km2_to_show) -- first row whose
     # max_zoom is >= the current zoom wins; last matching row wins ties,
     # see tiers.length-1 fallback below for "zoom higher than every listed
@@ -2356,7 +2364,11 @@ def build_cell_zoom_declutter_script(map_var: str, registry: list[tuple[str, flo
         var minArea = minAreaForZoom(map.getZoom());
         cells.forEach(function(c) {{
             var show = c.a >= minArea;
-            c.m.setStyle({{opacity: show ? 0.6 : 0, fillOpacity: show ? 0.3 : 0}});
+            if (c.k === 'marker') {{
+                c.m.setOpacity(show ? 1 : 0);
+            }} else {{
+                c.m.setStyle({{opacity: show ? 0.6 : 0, fillOpacity: show ? 0.3 : 0}});
+            }}
         }});
     }}
     map.on('zoomend', updateCellVisibility);
@@ -2612,10 +2624,14 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
         cells_to_project = [c for p in fresh_products for c in _prev_cells.get(p, [])]
 
     # Registry feeding build_cell_zoom_declutter_script() below -- each
-    # entry is (this circle's Leaflet JS variable name, its real area in
-    # km^2), collected as markers are created so the post-loop script can
-    # reference every one of them by name.
-    cell_marker_registry: list[tuple[str, float]] = []
+    # entry is (this layer's Leaflet JS variable name, its parent cell's
+    # real area in km^2, "circle" or "marker"), collected as markers are
+    # created so the post-loop script can reference every one of them by
+    # name. A cell's direction arrow shares its own entry's area_km2 (not
+    # a separate importance score) specifically so it declutters in lock
+    # step with its own circle -- an arrow with no circle next to it (or
+    # vice versa) would just read as a rendering bug, not a feature.
+    cell_marker_registry: list[tuple[str, float, str]] = []
 
     n_projected = 0
     for c in cells_to_project:
@@ -2661,7 +2677,7 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
             popup=f"{label_prefix} #{c.id} — {c.max_dbz:.0f} dBZ now, trend: {c.trend}",
         )
         circle.add_to(m)
-        cell_marker_registry.append((circle.get_name(), area_km2))
+        cell_marker_registry.append((circle.get_name(), area_km2, "circle"))
 
         if not c.velocity_kmh or c.velocity_kmh[0] < min_speed_kmh:
             continue  # no reliable motion yet, or effectively stationary
@@ -2695,12 +2711,14 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
         nearest_lead = min(lead_times_min)
         arrow_lat, arrow_lon = project_forward(*c.centroid_latlon, speed_kmh,
                                                 bearing_deg, nearest_lead * 0.55)
-        folium.Marker(
+        arrow = folium.Marker(
             location=(arrow_lat, arrow_lon),
             icon=build_bearing_arrow_icon(bearing_deg, "#333333"),
             tooltip=f"{label_prefix} #{c.id} heading {bearing_deg:.0f}° "
                     f"at {speed_kmh:.0f} km/h",
-        ).add_to(m)
+        )
+        arrow.add_to(m)
+        cell_marker_registry.append((arrow.get_name(), area_km2, "marker"))
         n_projected += 1
 
     if n_projected == 0:
