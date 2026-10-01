@@ -2298,6 +2298,73 @@ def build_autorefresh_script(interval_minutes: int = AUTOREFRESH_MINUTES) -> str
     return f"setTimeout(function() {{ window.location.reload(); }}, {interval_ms});"
 
 
+def build_cell_zoom_declutter_script(map_var: str, registry: list[tuple[str, float]]) -> str:
+    """Thins out cell markers by ZOOM LEVEL the same way OSM/Google Maps
+    declutters place labels -- fewer, only the most significant ones
+    visible zoomed out over a wide area, progressively more revealed as
+    you zoom into a smaller area -- requested directly after a wide-area
+    view (multiple radars, many small cells) read as too busy/cluttered.
+    "Significant" here is the cell's own real detected area in km^2 (the
+    same area_km2 already driving its marker radius -- see that comment a
+    few lines up), a reasonable stand-in for "how much this matters to a
+    reader scanning the whole map" the same way a city's population
+    decides whether it's labeled at a given map zoom.
+
+    Deliberately a flat lookup table of (max zoom, min area_km2 to show)
+    tiers rather than a continuous formula -- easier to reason about and
+    retune by eye than a smooth curve, and label-declutter systems
+    elsewhere (OSM included) are themselves tiered, not continuous, for
+    the same reason. Tuned against this map's own default zoom levels
+    (build_forecast_map uses 7 for a multi-radar view, 9 for single-radar)
+    and will likely want retuning once this has been watched through a
+    real widespread-storm day where there are enough cells for decluttering
+    to matter at all -- at low cell counts every tier shows everything
+    anyway. Every tier's threshold is inclusive of the zoom below it (the
+    last matching row wins), so zoom 12 and up always shows every cell
+    regardless of size.
+
+    Hides rather than removes a marker outside its tier (opacity/
+    fillOpacity to 0 via Leaflet's setStyle) -- cheaper than re-adding/
+    removing layers on every zoom change, and the marker's popup still
+    works if a reader somehow clicks through an invisible one, which is a
+    fine trade for how rarely that'll happen.
+
+    Returns BARE JavaScript (no <script> tags) for the same reason
+    build_autorefresh_script's docstring explains -- added the same way,
+    via m.get_root().script.add_child(...)."""
+    if not registry:
+        return ""
+    entries = ",".join(f"{{m:{name},a:{area:.3f}}}" for name, area in registry)
+    # (max_zoom_for_this_tier, min_area_km2_to_show) -- first row whose
+    # max_zoom is >= the current zoom wins; last matching row wins ties,
+    # see tiers.length-1 fallback below for "zoom higher than every listed
+    # tier -> show everything".
+    tiers = [(6, 60.0), (7, 25.0), (8, 12.0), (9, 6.0), (10, 2.0), (11, 0.5)]
+    tiers_js = ",".join(f"[{z},{a}]" for z, a in tiers)
+    return f"""
+(function() {{
+    var map = {map_var};
+    var cells = [{entries}];
+    var tiers = [{tiers_js}];
+    function minAreaForZoom(z) {{
+        for (var i = 0; i < tiers.length; i++) {{
+            if (z <= tiers[i][0]) return tiers[i][1];
+        }}
+        return 0;  // past the last tier -- show every cell, however small
+    }}
+    function updateCellVisibility() {{
+        var minArea = minAreaForZoom(map.getZoom());
+        cells.forEach(function(c) {{
+            var show = c.a >= minArea;
+            c.m.setStyle({{opacity: show ? 0.6 : 0, fillOpacity: show ? 0.3 : 0}});
+        }});
+    }}
+    map.on('zoomend', updateCellVisibility);
+    updateCellVisibility();
+}})();
+"""
+
+
 def build_fallback_logo_html() -> str:
     """Standalone logo box for the (rare) case there's no reflectivity data
     yet to show the info banner at all -- keeps the branding present on
@@ -2544,6 +2611,12 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
     else:
         cells_to_project = [c for p in fresh_products for c in _prev_cells.get(p, [])]
 
+    # Registry feeding build_cell_zoom_declutter_script() below -- each
+    # entry is (this circle's Leaflet JS variable name, its real area in
+    # km^2), collected as markers are created so the post-loop script can
+    # reference every one of them by name.
+    cell_marker_registry: list[tuple[str, float]] = []
+
     n_projected = 0
     for c in cells_to_project:
         # Real-world (meter) radius, not a fixed SCREEN-pixel radius --
@@ -2569,7 +2642,7 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
         radius_m = max(500.0, (area_km2 / np.pi) ** 0.5 * 1000.0)
         fill_color = "#2ca02c" if do_fuse else PRODUCT_STYLE.get(c.product, {}).get("color", "#08306b")
         label_prefix = "Fused cell" if do_fuse else f"{c.product.upper()} cell"
-        folium.Circle(
+        circle = folium.Circle(
             location=c.centroid_latlon, radius=radius_m,
             # Semi-transparent on purpose -- these markers sit directly on
             # top of the reflectivity raster (the actual storm shape drawn
@@ -2586,7 +2659,9 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
             color="white", weight=3, opacity=0.6,
             fill=True, fill_color=fill_color, fill_opacity=0.3,
             popup=f"{label_prefix} #{c.id} — {c.max_dbz:.0f} dBZ now, trend: {c.trend}",
-        ).add_to(m)
+        )
+        circle.add_to(m)
+        cell_marker_registry.append((circle.get_name(), area_km2))
 
         if not c.velocity_kmh or c.velocity_kmh[0] < min_speed_kmh:
             continue  # no reliable motion yet, or effectively stationary
@@ -2643,6 +2718,8 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
     m.get_root().html.add_child(folium.Element(build_watermark_html()))
     m.get_root().html.add_child(folium.Element(build_home_button_html()))
     m.get_root().script.add_child(folium.Element(build_autorefresh_script()))
+    m.get_root().script.add_child(folium.Element(
+        build_cell_zoom_declutter_script(m.get_name(), cell_marker_registry)))
 
     if out_html:
         m.save(out_html)
