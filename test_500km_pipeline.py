@@ -77,12 +77,26 @@ that lets Chennai be directly compared against the Karaikal hybrid as a
 candidate 500km-extended-range source -- see its PRODUCTS entry in
 nowcast_bot.py for the calibration and the national-emblem
 label_exclude_boxes fix its first real frame needed.
+
+Also now polling mlr_maxz -- IMD's Mangalore CAZ MAXZ (caz_mlr.gif), 250km
+range, added per explicit instruction ("add CAZ ... to the test version.
+Once it works well then we can shift to production version") -- test-repo
+ONLY for now, deliberately not touched in the production repo yet. A
+third distinct panel layout (circular plan-view with radial spokes and
+concentric range rings, no printed lat/lon gridlines) alongside the two
+families already here -- see its PRODUCTS entry and the
+RADAR_SITES["mangalore"] comment in nowcast_bot.py for the full
+calibration methodology (site_px found by extrapolating along the
+100/200km range-ring labels rather than from a literal site marker, after
+an initial attempt mistook a coastline-dash artifact for one) and for the
+UNVERIFIED status of its site_lat/site_lon (a public estimate, not yet
+measured from the image's own geometry the way kochi/chennai's were).
 """
 from pathlib import Path
 
 import nowcast_bot as nb
 
-TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "koc_maxz", "cni_maxz", "cni_ppz")
+TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "koc_maxz", "cni_maxz", "cni_ppz", "mlr_maxz")
 
 nb.POLLED_PRODUCTS = TEST_PRODUCTS
 nb.ARCHIVE_DIR = Path("archive_500km_test")

@@ -136,6 +136,27 @@ RADAR_SITES = {
         "site_elev_m": 6.0,        # UNVERIFIED — Chennai-area average-elevation guess
         "band": "S",               # per direct report -- S-band, unlike NIOT/Karaikal/Kochi
     },
+
+    # --- Fifth radar: IMD's Mangalore CAZ MAXZ (caz_mlr.gif), 250km range,
+    # test-repo-only for now per explicit instruction ("add CAZ ... to the
+    # test version. Once it works well then we can shift to production").
+    # UNVERIFIED -- unlike kochi/chennai above, this is a plain public
+    # estimate of the radar's town (Bajpe, next to Mangalore
+    # International Airport -- IMD's own site diagrams/NOTAMs place the
+    # DWR on airport grounds), NOT measured from the image's own geometry
+    # the way kochi/chennai's site_lat/site_lon were. The image-pixel-
+    # facing calibration (site_px/km_per_px in PRODUCTS["mlr_maxz"] below)
+    # is independently measured and doesn't depend on this being exactly
+    # right -- only the Leaflet-map-facing marker position does. Worth
+    # replacing with a confirmed coordinate (or re-deriving from the
+    # image's own gridlines/landmarks, the way chennai's was) before this
+    # ever reaches production.
+    "mangalore": {
+        "site_lat": 12.9500,
+        "site_lon": 74.8900,
+        "site_elev_m": 90.0,       # UNVERIFIED -- Bajpe plateau elevation, public-estimate
+        "band": "S",               # UNVERIFIED -- assumed consistent with Chennai/Kochi/Karaikal coastal DWRs, not confirmed for this site
+    },
 }
 
 PRODUCT_RADAR = {
@@ -143,6 +164,7 @@ PRODUCT_RADAR = {
     "kkl_ppi": "karaikal", "kkl_ppz": "karaikal", "kkl_maxz": "karaikal",
     "koc_maxz": "kochi",
     "cni_maxz": "chennai", "cni_ppz": "chennai",
+    "mlr_maxz": "mangalore",
 }
 
 EFFECTIVE_EARTH_RADIUS_KM = 8494.0  # standard 4/3-Earth-radius model
@@ -589,6 +611,89 @@ PRODUCTS = {
             (705, 685, 799, 800),   # national emblem/seal, bottom-right of the plot panel
         ],
     },
+
+    # --- Mangalore CAZ MAXZ (caz_mlr.gif), 250km range -- test-repo-only
+    # for now (see calibration-status comment above RADAR_SITES).
+    #
+    # A THIRD distinct panel layout, different from both of the other two
+    # families already in this dict: NIOT/karaikal's square plot_bbox with
+    # printed "XX km" range-ring text labels along one axis, and
+    # kochi/chennai's "Max with panels" layout with full printed lat/lon
+    # gridlines -- this one is a circular plan-view with radial spokes and
+    # concentric range rings (0/100/200km labeled, extending out to the
+    # product's actual 250km range), no lat/lon gridlines printed at all.
+    # That ruled out this dict's two existing calibration methods (gridline
+    # peak-scan; printed "XX km" label boxes read directly as the ring
+    # distance) and needed a different approach:
+    #
+    # 1. A real frame was fetched via a one-off GitHub Actions workflow
+    #    (fetch_calibration_sample.yml) since this sandbox's own network
+    #    can't reach mausam.imd.gov.in directly -- same restriction that
+    #    drives the whole pipeline running on Actions in the first place.
+    #    Confirmed 1310x1080, single frame, matches the live site's own
+    #    screenshots.
+    # 2. plot_bbox found via per-column/row dark-pixel transition scans for
+    #    the panel border, giving (0, 200, 879, 1080) -- the circular
+    #    plan-view panel occupies the left ~879px of the 1310px-wide frame
+    #    (the colorbar + timestamp/metadata text live to the right of it).
+    # 3. site_px was NOT found from a literal site-icon marker -- a cluster
+    #    of blue dashed pixels near the "0.0 km" label initially looked
+    #    like one, but on closer inspection was coastline/state-border dash
+    #    rendering, not a genuine site marker (a real caught-and-corrected
+    #    mistake during calibration, not a known IMD convention). Instead,
+    #    site_px was found by LINEAR EXTRAPOLATION along the labeled
+    #    reference spoke: the "200.0 km" and "100.0 km" range-ring text
+    #    labels on that spoke gave a reliable two-point line (their pixel
+    #    gap matches a consistent km_per_px), extrapolated inward to where
+    #    "0.0 km" (the site itself) must sit -- the "0.0 km" label's own
+    #    printed TEXT position was NOT used directly, since (unlike the
+    #    other two labels, which sit right next to their true tick
+    #    positions) its text is offset well away from the actual site
+    #    point, which is what caused an initial ~2x km_per_px inconsistency
+    #    before this was caught.
+    # 4. Cross-validated two independent ways before trusting it: (a) the
+    #    derived site_px/km_per_px pair puts the panel's top and right
+    #    edges almost exactly 250km (this product's own stated max range)
+    #    from the site, as geometry demands; (b) the extrapolated point
+    #    lands almost exactly on the frame's own printed "IXE AP" label
+    #    (Mangalore International Airport's IATA code) -- consistent with
+    #    IMD siting this DWR on airport grounds, same real-world landmark
+    #    RADAR_SITES["mangalore"]'s site_lat/site_lon estimate is also
+    #    based on (though that lat/lon itself is still UNVERIFIED/not
+    #    image-derived, see that comment).
+    # 5. colorbar_bbox measured by locating the colorbar's exact swatch
+    #    pixel bounds, deliberately excluding the ~15px solid black frame
+    #    surrounding it (found at roughly x=1161-1176 and x=1218-1228) --
+    #    build_lut_from_colorbar() samples the horizontal-middle column of
+    #    this bbox per source row, so including any of that black border
+    #    would corrupt the LUT with spurious near-black entries.
+    "mlr_maxz": {
+        "url": "https://mausam.imd.gov.in/Radar/caz_mlr.gif",
+        "role": "aloft_early_warning",
+        "range_km": 250.0,         # printed directly in the frame's own metadata panel
+        "elevation_deg": None,     # column-max, not a single tilt -- same as every other MAXZ product here
+        "image_size": (1310, 1080),
+        "site_px": (446.0, 633.0),  # extrapolated from the 100/200km ring labels, NOT the "0.0 km" label itself -- see calibration-status comment above
+        "km_per_px": 0.5773,
+        "colorbar_bbox": (1177, 363, 1216, 816),
+        "value_at_top": 60.0,      # same uniform 2.5dB/band MAX(dBZ) scale as every other MAXZ/PPZ product
+        "value_at_bottom": 20.0,
+        "timestamp_bbox": (1080, 90, 1310, 110),
+        "elevation_bbox": None,    # no elevation line -- column-max product
+        "plot_bbox": (0, 200, 879, 1080),
+        "cell_dbz_threshold": 35,  # matches every other MAXZ product here
+        # The three printed "XX.X km" range-ring labels along the
+        # reference spoke used for site_px extrapolation above (see that
+        # comment) -- boxed out the same reason every other product here
+        # boxes its own printed range-ring text: these sit at fixed pixel
+        # positions regardless of the data frame and would otherwise read
+        # as unchanging "cells" every cycle.
+        "label_exclude_boxes": [
+            (428, 277, 485, 300),   # "200.0 km" label
+            (436, 449, 485, 469),   # "100.0 km" label
+            (443, 536, 524, 557),   # "0.0 km" label
+        ],
+    },
 }
 
 POLL_SECONDS = 120
@@ -962,6 +1067,29 @@ def extract_observation_time(img: Image.Image, product: str) -> datetime | None:
             if m:
                 date_str, time_str, date_fmt = m.group(2), m.group(1), "%d %b %Y"
             else:
+                # Mangalore's layout: a fifth one, "HH:MM:SS UTC /
+                # DD-Mon-YYYY" -- hyphenated date like Chennai's below, but
+                # WITH an explicit seconds field and WITH the explicit
+                # "UTC" suffix (Chennai has neither). Distinct enough from
+                # Chennai's pattern just below that the two never collide:
+                # Chennai's regex expects "/" immediately after "HH:MM",
+                # but a Mangalore frame has ":SS UTC" sitting in between,
+                # so Chennai's pattern simply fails to match a Mangalore
+                # frame's text, and (since this one requires the literal
+                # "UTC" token right after the seconds) this pattern equally
+                # never matches a genuine Chennai frame.
+                m = re.search(r"(\d{2}:\d{2}:\d{2})\s*UTC\s*/\s*(\d{1,2}-\w{3}-\d{4})", text)
+                if m:
+                    time_str, date_str, date_fmt, time_fmt = m.group(1), m.group(2), "%d-%b-%Y", "%H:%M:%S"
+                    try:
+                        dt = datetime.strptime(f"{date_str} {time_str}", f"{date_fmt} {time_fmt}")
+                    except ValueError:
+                        return None
+                    dt = dt.replace(tzinfo=timezone.utc)
+                    if abs((dt - datetime.now(timezone.utc)).total_seconds()) > 3 * 86400:
+                        return None
+                    return dt
+
                 # Chennai's layout: a fourth one, "HH:MM / DD-Mon-YYYY" --
                 # no seconds field and no explicit "UTC" suffix anywhere
                 # near it (unlike every other layout here, which all print
@@ -1589,6 +1717,7 @@ PRODUCT_STYLE = {
     "koc_maxz": {"color": "#2ca02c", "label": "Kochi MAXZ - aloft / building"},
     "cni_maxz": {"color": "#e377c2", "label": "Chennai DWR MAXZ - aloft / building"},
     "cni_ppz": {"color": "#7f7f7f", "label": "Chennai Extended Radar"},
+    "mlr_maxz": {"color": "#bcbd22", "label": "Mangaluru DWR MAXZ - aloft / building"},
 }
 
 RADAR_MARKER_LABEL = {"niot": "NIOT X-DWR Chennai", "karaikal": "Karaikal DWR",
