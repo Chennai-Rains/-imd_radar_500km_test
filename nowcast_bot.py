@@ -713,29 +713,50 @@ PRODUCTS = {
             (436, 449, 485, 469),   # "100.0 km" label
             (443, 536, 524, 557),   # "0.0 km" label
         ],
-        # KNOWN ISSUE, not yet fixed: this frame's thin WHITE state/district
-        # border lines (criss-crossing the whole inland panel, not a small
-        # fixed region) sampled at (255,255,255) -- an EXACT match (dist=0)
-        # against this product's own LUT, which uses a near-white swatch at
-        # 41.3-42.5dBZ (visible as the pale band in the legend) -- so border
-        # crossings read as real mid-intensity echo. Confirmed directly
-        # against the one real sample frame available so far: most of the
-        # scattered "cells" east of the coast, inland over dry Karnataka,
-        # turned out to be this, not real rain.
-        # Deliberately NOT building a static_exclude_mask or excluding pure
-        # white yet -- same reasoning cni_maxz's own comment gives for not
-        # doing this from a single still frame: this scale's white band is a
-        # LEGITIMATE mid-range dBZ color (unlike koc_maxz's gridlines, which
-        # sit in a part of the scale no real echo should ever render as), so
-        # a position-based mask (koc_maxz's approach) is the right tool --
-        # but that needs several real archived frames diffed for pixels that
-        # are white in EVERY frame (the actual border lines) vs. only
-        # sometimes (genuine white-band echo), which fetch_calibration_sample
-        # can't provide from one static sample. Now that mlr_maxz is polling
-        # for real on the test pipeline, archive_500km_test/ will accumulate
-        # exactly that -- build masks/mlr_maxz_static_exclude.png from a
-        # batch of those frames the same way koc_maxz's was, once there's
-        # enough history to trust the intersection.
+        # This frame's thin state/district border lines (criss-crossing the
+        # whole inland panel, not a small fixed region) happen to render in
+        # shades close enough to this product's own LUT swatches -- a PURE
+        # white border pixel is an EXACT match (dist=0) against the
+        # 41.3-42.5dBZ near-white band, and antialiased border pixels
+        # (blended against the tan terrain basemap underneath) land on
+        # other bands the same way -- so border crossings were reading as
+        # real low/mid-intensity echo across the whole panel. Unlike
+        # koc_maxz's gridlines (which sit in a part of that scale no real
+        # echo should ever render as, so excluding the color outright was
+        # safe), this scale's white/near-white bands ARE legitimate dBZ
+        # values, so neither a color exclude nor a naive "mask every pixel
+        # that's ever white" approach was safe -- an early attempt at the
+        # latter (masking pixels white in every one of several real frames)
+        # also masked out a genuine, geographically-anchored storm sitting
+        # near the coast the whole time window, which is exactly the
+        # signal this pipeline exists to keep.
+        #
+        # What actually worked: build the SAME cross-frame persistence
+        # mask (pixels that decode as finite dBZ, any value, in every one
+        # of several real archived frames -- a real storm moves/changes
+        # intensity cycle to cycle and shouldn't stay pinned to the exact
+        # same pixels for the whole span, so persistence alone already
+        # flags mostly-static basemap graphics), then split that
+        # persistence mask by SHAPE, not color: scipy.ndimage.binary_opening
+        # with a 3x3 structuring element (2 iterations) erodes away
+        # anything thinner than ~2px -- true border lines and the dashed
+        # 100/200km range-ring circles -- while leaving wider real storm
+        # blobs intact; only the eroded-away (thin/line-like) remainder is
+        # excluded. Visually confirmed against the real frames: the
+        # resulting mask traces the border/coastline network cleanly and
+        # leaves the real coastal storm untouched. Built from 4 real frames
+        # spanning 11:20-12:10 UTC on 2026-10-01 (the
+        # fetch_calibration_sample.yml sample plus three cycles the live
+        # test pipeline had archived by then) -- cut this one frame's cell
+        # count from 371 (no mask) to 58 (naive white-intersection mask,
+        # still missed antialiased border pixels) to 53 (this shape-based
+        # mask), with the remaining handful concentrated at real echo and
+        # a few border-LINE-INTERSECTION points the opening didn't fully
+        # erode. Only 4 frames/50 minutes of history so far -- worth
+        # regenerating (same method, more/later frames, perhaps one more
+        # opening iteration) if a future cycle still shows a residual
+        # border-crossing false cell.
+        "static_exclude_mask": "masks/mlr_maxz_static_exclude.png",
     },
 }
 
