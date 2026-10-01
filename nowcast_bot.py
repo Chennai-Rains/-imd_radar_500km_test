@@ -2511,11 +2511,31 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
 
     n_projected = 0
     for c in cells_to_project:
-        radius = 7 + min(c.pixel_count / 40, 8)
+        # Real-world (meter) radius, not a fixed SCREEN-pixel radius --
+        # reported directly: with CircleMarker's radius in screen pixels,
+        # a cell marker stays the exact same size on screen as the map is
+        # zoomed out, while the reflectivity raster under it (anchored to
+        # real lat/lon bounds) shrinks the way it actually should, so the
+        # marker visibly outgrows its own storm the further out you zoom.
+        # Deriving the marker's radius from the cell's real detected area
+        # (pixel_count converted through this product's own km_per_px to
+        # km^2, then to an equivalent-area circle's radius in meters) and
+        # drawing it with folium.Circle (meters, zoom-scaling) instead of
+        # CircleMarker (pixels, zoom-fixed) makes the marker behave exactly
+        # like the raster it's sitting on: shrink/grow together at any
+        # zoom level. A fused multi-radar cell's pixel_count sums across
+        # possibly-different-resolution source products, so this uses the
+        # first contributing product's km_per_px as an approximation --
+        # fine for a visual size cue, not meant to be exact.  A small floor
+        # (500m) keeps even a single-pixel cell visibly clickable rather
+        # than vanishing at typical zoom levels.
+        km_per_px = PRODUCTS[c.product]["km_per_px"]
+        area_km2 = c.pixel_count / (km_per_px ** 2)
+        radius_m = max(500.0, (area_km2 / np.pi) ** 0.5 * 1000.0)
         fill_color = "#2ca02c" if do_fuse else PRODUCT_STYLE.get(c.product, {}).get("color", "#08306b")
         label_prefix = "Fused cell" if do_fuse else f"{c.product.upper()} cell"
-        folium.CircleMarker(
-            location=c.centroid_latlon, radius=radius,
+        folium.Circle(
+            location=c.centroid_latlon, radius=radius_m,
             # Semi-transparent on purpose -- these markers sit directly on
             # top of the reflectivity raster (the actual storm shape drawn
             # a few lines up via ImageOverlay), and at full opacity a cell
