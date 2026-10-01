@@ -2516,8 +2516,19 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
         label_prefix = "Fused cell" if do_fuse else f"{c.product.upper()} cell"
         folium.CircleMarker(
             location=c.centroid_latlon, radius=radius,
-            color="white", weight=3, opacity=1.0,
-            fill=True, fill_color=fill_color, fill_opacity=1.0,
+            # Semi-transparent on purpose -- these markers sit directly on
+            # top of the reflectivity raster (the actual storm shape drawn
+            # a few lines up via ImageOverlay), and at full opacity a cell
+            # marker fully occults whatever real echo pattern is under it,
+            # which is most of what a viewer actually wants to see. Dropped
+            # from opaque (1.0/1.0) to a see-through fill (0.55) with a
+            # lighter outline (0.85) so the marker still reads clearly as
+            # "a tracked cell is here" without blotting out the raster
+            # underneath it. Test-repo only for now, per explicit
+            # instruction -- carry over to production once this looks good
+            # here.
+            color="white", weight=3, opacity=0.85,
+            fill=True, fill_color=fill_color, fill_opacity=0.55,
             popup=f"{label_prefix} #{c.id} — {c.max_dbz:.0f} dBZ now, trend: {c.trend}",
         ).add_to(m)
 
