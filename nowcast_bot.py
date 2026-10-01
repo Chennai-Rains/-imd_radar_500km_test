@@ -2656,31 +2656,32 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
 
     n_projected = 0
     for c in cells_to_project:
-        # Real-world (meter) radius, not a fixed SCREEN-pixel radius --
-        # reported directly: with CircleMarker's radius in screen pixels,
-        # a cell marker stays the exact same size on screen as the map is
-        # zoomed out, while the reflectivity raster under it (anchored to
-        # real lat/lon bounds) shrinks the way it actually should, so the
-        # marker visibly outgrows its own storm the further out you zoom.
-        # Deriving the marker's radius from the cell's real detected area
-        # (pixel_count converted through this product's own km_per_px to
-        # km^2, then to an equivalent-area circle's radius in meters) and
-        # drawing it with folium.Circle (meters, zoom-scaling) instead of
-        # CircleMarker (pixels, zoom-fixed) makes the marker behave exactly
-        # like the raster it's sitting on: shrink/grow together at any
-        # zoom level. A fused multi-radar cell's pixel_count sums across
-        # possibly-different-resolution source products, so this uses the
-        # first contributing product's km_per_px as an approximation --
-        # fine for a visual size cue, not meant to be exact.  A small floor
-        # (500m) keeps even a single-pixel cell visibly clickable rather
-        # than vanishing at typical zoom levels.
+        # Fixed SCREEN-pixel radius again, not a real-world (meter) one --
+        # this went meter-based (folium.Circle, zoom-scaling) for one round
+        # specifically to stop a cell marker from visibly outgrowing its
+        # own shrinking storm raster as you zoomed out. Reported again
+        # after that: the fix traded one problem for another -- a cell
+        # marker shrinking in lockstep with the raster reads as "this
+        # marker is sized to this storm", which invites comparing the two
+        # at every zoom level, and a floored, approximate equal-area
+        # circle will never match the raster's actual (often irregular)
+        # footprint closely enough to survive that comparison. Explicit
+        # direction instead: treat it like a basemap PLACE LABEL -- the
+        # text for a city name stays the same pixel size at every zoom
+        # level (what changes with zoom is which labels are dense enough
+        # to show at all, which build_cell_zoom_declutter_script already
+        # handles), it never grows or shrinks to match the city's real
+        # footprint. So back to CircleMarker (pixels, zoom-fixed), sized
+        # by area_km2 only to give bigger/stronger cells a modestly bigger
+        # fixed dot than small ones (the way a capital gets bigger label
+        # text than a village) -- never by zoom level.
         km_per_px = PRODUCTS[c.product]["km_per_px"]
         area_km2 = c.pixel_count / (km_per_px ** 2)
-        radius_m = max(500.0, (area_km2 / np.pi) ** 0.5 * 1000.0)
+        radius_px = min(6.0 + area_km2 ** 0.5 * 0.4, 14.0)
         fill_color = "#2ca02c" if do_fuse else PRODUCT_STYLE.get(c.product, {}).get("color", "#08306b")
         label_prefix = "Fused cell" if do_fuse else f"{c.product.upper()} cell"
-        circle = folium.Circle(
-            location=c.centroid_latlon, radius=radius_m,
+        circle = folium.CircleMarker(
+            location=c.centroid_latlon, radius=radius_px,
             # Semi-transparent on purpose -- these markers sit directly on
             # top of the reflectivity raster (the actual storm shape drawn
             # a few lines up via ImageOverlay), and at full opacity a cell
