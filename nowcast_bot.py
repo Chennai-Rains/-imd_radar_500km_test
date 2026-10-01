@@ -2339,7 +2339,28 @@ def build_cell_zoom_declutter_script(map_var: str, registry: list[tuple[str, flo
 
     Returns BARE JavaScript (no <script> tags) for the same reason
     build_autorefresh_script's docstring explains -- added the same way,
-    via m.get_root().script.add_child(...)."""
+    via m.get_root().script.add_child(...).
+
+    CRITICAL ORDERING NOTE, learned the hard way (reported directly as a
+    completely blank map, banner/legend still visible -- the exact
+    "everything after this line in the shared script block silently
+    stops running" symptom build_autorefresh_script's own docstring warns
+    about, caused a different way this time): m.get_root().script.add_child
+    appends to the ROOT figure's script list, which branca renders BEFORE
+    the map/circle/marker elements' own auto-generated init code later in
+    that same shared <script> block -- so at the moment this function's
+    code would normally run, `{{map_var}}` and every `circle_*`/`marker_*`
+    variable it references don't exist yet. Referencing an undefined var
+    throws, and since it's all one synchronous <script> tag, that
+    exception kills every statement after it -- including Leaflet's own
+    map/tile-layer init -- leaving a blank page with only the plain-HTML
+    overlays (which don't depend on any JS running) still showing.
+    Wrapping the whole body in setTimeout(fn, 0) defers it to the next
+    event-loop tick, by which point the REST of this same script block
+    (map/circle/marker declarations included) has already finished
+    executing synchronously -- cheap and sufficient, no need for a
+    DOMContentLoaded/load listener since nothing here waits on external
+    resources, just on later lines of the same script having run."""
     if not registry:
         return ""
     entries = ",".join(f'{{m:{name},a:{area:.3f},k:"{kind}"}}' for name, area, kind in registry)
@@ -2350,7 +2371,7 @@ def build_cell_zoom_declutter_script(map_var: str, registry: list[tuple[str, flo
     tiers = [(6, 60.0), (7, 25.0), (8, 12.0), (9, 6.0), (10, 2.0), (11, 0.5)]
     tiers_js = ",".join(f"[{z},{a}]" for z, a in tiers)
     return f"""
-(function() {{
+setTimeout(function() {{
     var map = {map_var};
     var cells = [{entries}];
     var tiers = [{tiers_js}];
@@ -2373,7 +2394,7 @@ def build_cell_zoom_declutter_script(map_var: str, registry: list[tuple[str, flo
     }}
     map.on('zoomend', updateCellVisibility);
     updateCellVisibility();
-}})();
+}}, 0);
 """
 
 
