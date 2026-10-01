@@ -38,10 +38,24 @@ jobs:
           fetch-depth: 1
           ref: main
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Pillow
+        run: pip install Pillow
+
       - name: Download frame
         run: |
           mkdir -p calibration
-          curl -sS -f -o "calibration/${{ inputs.out_path }}" "${{ inputs.url }}"
+          HTTP_CODE=$(curl -sS -w "%{http_code}" -o "calibration/${{ inputs.out_path }}" "${{ inputs.url }}")
+          echo "HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Fetch failed with HTTP $HTTP_CODE"
+            cat "calibration/${{ inputs.out_path }}" || true
+            exit 1
+          fi
           echo "Downloaded $(stat -c%s "calibration/${{ inputs.out_path }}") bytes"
           python3 -c "
           from PIL import Image
