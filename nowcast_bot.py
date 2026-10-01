@@ -661,6 +661,26 @@ PRODUCTS = {
     #    RADAR_SITES["mangalore"]'s site_lat/site_lon estimate is also
     #    based on (though that lat/lon itself is still UNVERIFIED/not
     #    image-derived, see that comment).
+    #
+    # CORRECTED -- despite its name, "km_per_px" is used throughout this
+    # dict as a PIXELS-per-km scale: pixel_to_latlon()/latlon_to_pixel()
+    # both DIVIDE a pixel distance by this field to get km (see those
+    # functions, and the comment just above PRODUCTS calling the same
+    # quantity an "isotropic px-per-km scale"). The value originally
+    # entered here (0.5773) was instead the true km-PER-pixel (100km-ring-
+    # to-200km-ring pixel gap of ~173px -> 1.73 px/km, inverted by
+    # mistake) -- harmless for every other product in this file so far
+    # only because kochi/chennai's own measured values happened to be
+    # close to 1.0 either way, so the bug went unnoticed until a real
+    # frame showed cells and district borders rendering roughly 3x
+    # (1.732^2 worth of distance-vs-area confusion, not literally 3x
+    # linearly, but the effect compounds the same way) further from the
+    # site than the real 250km range allows -- echo that's really just
+    # off the coast of Mangaluru was landing as far out as Chennai and
+    # Telangana on the Leaflet map, caught from a live screenshot. Fixed
+    # value below is the reciprocal (1/0.5773 = 1.732), which also
+    # matches the directly-measured 173px-per-100km ring gap and the
+    # panel-edge-vs-250km-range cross-check in point 4 above exactly.
     # 5. colorbar_bbox measured by locating the colorbar's exact swatch
     #    pixel bounds, deliberately excluding the ~15px solid black frame
     #    surrounding it (found at roughly x=1161-1176 and x=1218-1228) --
@@ -674,7 +694,7 @@ PRODUCTS = {
         "elevation_deg": None,     # column-max, not a single tilt -- same as every other MAXZ product here
         "image_size": (1310, 1080),
         "site_px": (446.0, 633.0),  # extrapolated from the 100/200km ring labels, NOT the "0.0 km" label itself -- see calibration-status comment above
-        "km_per_px": 0.5773,
+        "km_per_px": 1.7320,  # pixels-per-km, despite the field's name -- see CORRECTED comment above (was mistakenly stored as the inverse, 0.5773)
         "colorbar_bbox": (1177, 363, 1216, 816),
         "value_at_top": 60.0,      # same uniform 2.5dB/band MAX(dBZ) scale as every other MAXZ/PPZ product
         "value_at_bottom": 20.0,
@@ -693,6 +713,29 @@ PRODUCTS = {
             (436, 449, 485, 469),   # "100.0 km" label
             (443, 536, 524, 557),   # "0.0 km" label
         ],
+        # KNOWN ISSUE, not yet fixed: this frame's thin WHITE state/district
+        # border lines (criss-crossing the whole inland panel, not a small
+        # fixed region) sampled at (255,255,255) -- an EXACT match (dist=0)
+        # against this product's own LUT, which uses a near-white swatch at
+        # 41.3-42.5dBZ (visible as the pale band in the legend) -- so border
+        # crossings read as real mid-intensity echo. Confirmed directly
+        # against the one real sample frame available so far: most of the
+        # scattered "cells" east of the coast, inland over dry Karnataka,
+        # turned out to be this, not real rain.
+        # Deliberately NOT building a static_exclude_mask or excluding pure
+        # white yet -- same reasoning cni_maxz's own comment gives for not
+        # doing this from a single still frame: this scale's white band is a
+        # LEGITIMATE mid-range dBZ color (unlike koc_maxz's gridlines, which
+        # sit in a part of the scale no real echo should ever render as), so
+        # a position-based mask (koc_maxz's approach) is the right tool --
+        # but that needs several real archived frames diffed for pixels that
+        # are white in EVERY frame (the actual border lines) vs. only
+        # sometimes (genuine white-band echo), which fetch_calibration_sample
+        # can't provide from one static sample. Now that mlr_maxz is polling
+        # for real on the test pipeline, archive_500km_test/ will accumulate
+        # exactly that -- build masks/mlr_maxz_static_exclude.png from a
+        # batch of those frames the same way koc_maxz's was, once there's
+        # enough history to trust the intersection.
     },
 }
 
