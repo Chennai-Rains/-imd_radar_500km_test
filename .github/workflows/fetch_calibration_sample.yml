@@ -1,0 +1,58 @@
+name: Fetch a calibration sample frame
+
+# One-off/reusable utility, NOT part of the regular polling pipeline: fetches
+# a single raw frame from a given IMD radar image URL and commits it
+# untouched into calibration/, so a new radar product's pixel layout
+# (site_px, colorbar_bbox, plot_bbox, label_exclude_boxes, etc. in
+# nowcast_bot.py's PRODUCTS dict) can be measured against the real image at
+# full native resolution -- this sandbox's own network can't reach
+# mausam.imd.gov.in directly (same egress restriction that makes the whole
+# polling pipeline run on GitHub Actions in the first place), so this is the
+# only way to get a real frame to calibrate against, short of someone
+# manually downloading and attaching one. Deliberately a separate workflow
+# from nowcast_500km_test.yml -- this has nothing to do with the regular
+# polling cycle and shouldn't share its concurrency group or run on a
+# schedule.
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Radar image URL to fetch"
+        required: true
+      out_path:
+        description: "Path (under calibration/) to commit the frame to"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: main
+
+      - name: Download frame
+        run: |
+          mkdir -p calibration
+          curl -sS -f -o "calibration/${{ inputs.out_path }}" "${{ inputs.url }}"
+          echo "Downloaded $(stat -c%s "calibration/${{ inputs.out_path }}") bytes"
+          python3 -c "
+          from PIL import Image
+          im = Image.open('calibration/${{ inputs.out_path }}')
+          print('size:', im.size, 'mode:', im.mode, 'frames:', getattr(im, 'n_frames', 1))
+          "
+
+      - name: Commit sample frame
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Add calibration sample frame: ${{ inputs.out_path }}"
+          file_pattern: "calibration/"
+          commit_user_name: "nowcast-bot"
+          commit_user_email: "actions@users.noreply.github.com"
