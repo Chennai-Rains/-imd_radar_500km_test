@@ -46,12 +46,34 @@ real image, meaning it's really rendered at that range by IMD, not
 stretched by us -- just at coarser resolution than kkl_maxz, which is
 exactly why it's only used for the ring kkl_maxz can't cover at all,
 rather than replacing kkl_maxz outright.
+
+Also now polling cni_maxz -- IMD's own Chennai DWR (S-band), caz_cni.gif,
+which came back online 2026-09-30 after being off-air. Added here first as
+one more product alongside the existing four, NOT as a replacement for
+anything yet: per explicit instruction, whether to eventually drop the
+Karaikal 500km extension in favor of Chennai (S-band, so potentially
+better long-range resolution than Karaikal's own radar) is a call to make
+once this has run for a few real days, not now. See its PRODUCTS entry in
+nowcast_bot.py for the calibration (measured from the frame's own lat/lon
+gridlines, same method as Kochi's) and the exclude_colors/despeckle_min_px/
+label_exclude_boxes fields added specifically for it -- this radar's first
+live frame showed heavy false echo (its open-water basemap texture
+coincidentally renders in colors close enough to real LUT swatches to read
+as rain across almost the whole visible sea surface) that needed real
+cleanup, not just the usual per-radar calibration.
+
+Also now dropping any product's data from the rendered map entirely once
+it's more than STALE_OBS_MINUTES (60) old, rather than just flagging it in
+the banner -- see build_forecast_map's fresh_products filtering in
+nowcast_bot.py. Chennai coming back online made this worth testing for
+real: a radar that was recently off-air is exactly the case where a stale
+cached frame could otherwise sit on the map looking like a live read.
 """
 from pathlib import Path
 
 import nowcast_bot as nb
 
-TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "koc_maxz")
+TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "koc_maxz", "cni_maxz")
 
 nb.POLLED_PRODUCTS = TEST_PRODUCTS
 nb.ARCHIVE_DIR = Path("archive_500km_test")

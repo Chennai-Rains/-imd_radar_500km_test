@@ -26,6 +26,27 @@ are also drawn thin/faint on both this build and the live map, since with
 multiple radars' rings now often overlapping they were stacking into
 visual clutter over the actual reflectivity data.
 
+Also now polling `cni_maxz` -- IMD's own Chennai DWR (S-band),
+`caz_cni.gif`, which came back online 2026-09-30. This is purely additive
+for now (NIOT/Karaikal/Kochi all keep their current products/ranges);
+whether to eventually drop the Karaikal 500km extension in favor of
+Chennai is a call for after a few real days of comparison, not yet. Its
+first live frame showed heavy false echo -- its open-water texture
+happened to render in colors close enough to this scale's real LUT
+swatches to read as rain across almost the whole visible sea -- fixed via
+`exclude_colors` (exact known-background shades, measured from a clean
+patch of that frame) plus `despeckle_min_px` and a few
+`label_exclude_boxes` for static graphics (the national emblem, a couple
+of station-code labels) that collided the same way. See its `PRODUCTS`
+entry in `nowcast_bot.py` for the full reasoning -- worth rechecking once
+more real frames (storms, not just clean water) have been seen.
+
+Any product's data is now dropped from the rendered map entirely once it's
+more than an hour old (`STALE_OBS_MINUTES` in `nowcast_bot.py`), not just
+flagged in the banner -- so a radar that's stuck or just came back online
+can't leave a stale-looking "storm" sitting on the map. Chennai coming
+back online made this worth actually exercising, not just adding.
+
 ## Running it
 
 The workflow (`.github/workflows/nowcast_500km_test.yml`) runs on a
@@ -72,6 +93,6 @@ and variables → Actions** here too:
   support were already in here; this repo is just what wires them into a
   build.
 - `test_500km_pipeline.py` -- the entry point: overrides
-  `POLLED_PRODUCTS` (now `maxz`, `kkl_maxz`, `kkl_ppz`, `koc_maxz`),
-  state/archive paths and the output filename, then calls
+  `POLLED_PRODUCTS` (now `maxz`, `kkl_maxz`, `kkl_ppz`, `koc_maxz`,
+  `cni_maxz`), state/archive paths and the output filename, then calls
   `nowcast_bot.run_pipeline()`.
