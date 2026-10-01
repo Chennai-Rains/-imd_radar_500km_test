@@ -68,12 +68,21 @@ the banner -- see build_forecast_map's fresh_products filtering in
 nowcast_bot.py. Chennai coming back online made this worth testing for
 real: a radar that was recently off-air is exactly the case where a stale
 cached frame could otherwise sit on the map looking like a live read.
+
+Also now polling cni_ppz -- Chennai's own extended-range PPZ product,
+genuinely rendered to 600km (more than Karaikal's 500km kkl_ppz). It
+cedes its own inner 250km disc to cni_maxz via mask_within_km=250.0,
+same hybrid pattern as kkl_ppz ceding to kkl_maxz. This is the piece
+that lets Chennai be directly compared against the Karaikal hybrid as a
+candidate 500km-extended-range source -- see its PRODUCTS entry in
+nowcast_bot.py for the calibration and the national-emblem
+label_exclude_boxes fix its first real frame needed.
 """
 from pathlib import Path
 
 import nowcast_bot as nb
 
-TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "koc_maxz", "cni_maxz")
+TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "koc_maxz", "cni_maxz", "cni_ppz")
 
 nb.POLLED_PRODUCTS = TEST_PRODUCTS
 nb.ARCHIVE_DIR = Path("archive_500km_test")

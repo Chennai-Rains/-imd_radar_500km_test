@@ -47,6 +47,19 @@ flagged in the banner -- so a radar that's stuck or just came back online
 can't leave a stale-looking "storm" sitting on the map. Chennai coming
 back online made this worth actually exercising, not just adding.
 
+Also now polling `cni_ppz` -- Chennai's own extended-range PPZ product,
+genuinely rendered to 600km (more reach than Karaikal's 500km `kkl_ppz`).
+Like `kkl_ppz`, it carries `mask_within_km: 250.0` so it only ever
+contributes the 250-600km ring, ceding the inner disc to `cni_maxz` --
+labeled "Chennai Extended Radar" on the page. Its first real frame needed
+one more fix beyond the `exclude_colors`/`despeckle_min_px` reused from
+`cni_maxz`: the only remaining false signal traced to the IMD national
+emblem printed over open water, fixed with a `label_exclude_boxes` entry.
+With Chennai now polling both its 250km and extended-range products, a
+real side-by-side against the Karaikal hybrid is possible -- still no
+decision yet on dropping Karaikal's 500km extension, per the plan to
+compare over a few real days first.
+
 ## Running it
 
 The workflow (`.github/workflows/nowcast_500km_test.yml`) runs on a
@@ -94,5 +107,5 @@ and variables → Actions** here too:
   build.
 - `test_500km_pipeline.py` -- the entry point: overrides
   `POLLED_PRODUCTS` (now `maxz`, `kkl_maxz`, `kkl_ppz`, `koc_maxz`,
-  `cni_maxz`), state/archive paths and the output filename, then calls
-  `nowcast_bot.run_pipeline()`.
+  `cni_maxz`, `cni_ppz`), state/archive paths and the output filename,
+  then calls `nowcast_bot.run_pipeline()`.
