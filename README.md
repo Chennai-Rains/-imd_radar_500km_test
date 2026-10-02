@@ -70,8 +70,12 @@ next to the test map by the same FTP step:
   every connected rain area down to 20 dBZ (the weakest echo IMD's images
   carry), each with its speed and direction.
 - `nowcast_bot_grid_500km_test.bin.gz` -- reflectivity on a 0.02 degree
-  (~2 km) lat/lon grid: one layer as observed, plus one each for +30, +60
-  and +90 minutes, moved along the measured motion.
+  (~2 km) lat/lon grid: one layer as observed, plus one every 10 minutes
+  from 0 to 90, moved along the measured motion. (Half-hour steps let a
+  small fast cell pass over a place between two snapshots unseen.) Each
+  echo is carried forward along its own measured motion, and a grid node
+  only counts as echo when at least a quarter of the radar pixels around
+  it have echo, so stray pixels are not blown up into rain.
 
 The map only carried this as a picture, and tracked cells only exist for
 cores of 30-35 dBZ and above, so lighter rain over a place was not
