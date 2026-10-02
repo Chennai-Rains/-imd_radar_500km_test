@@ -906,13 +906,28 @@ def range_from_site_km(latlon: tuple[float, float], product: str = "maxz") -> fl
 # shipped as assets/kkl_timestamp_templates.npz so it survives archive/
 # pruning) reads it correctly. Falls back to per-character Tesseract (more
 # reliable than whole-string OCR since there's no multi-char context to
-# confuse it) for any glyph the template library hasn't seen (notably: the
-# library was built from a handful of real frames and happens to have no
-# examples of digits 7/8/9 yet), and if that also can't confidently name a
-# glyph, extraction is abandoned for that frame -- same safe fall-back to
-# poll-receipt time as every other failure mode here.
+# confuse it) for any glyph the template library doesn't recognise, and if
+# that also can't confidently name a glyph, extraction is abandoned for
+# that frame -- same safe fall-back to poll-receipt time as every other
+# failure mode here.
+#
+# The library was rebuilt on 2026-10-02 from all 199 timestamped Karaikal
+# frames in this repo's history (kkl_maxz + kkl_ppz, 30 Sep - 2 Oct). The
+# first one (54 glyphs from a handful of frames) had no 7/8/9 at all, and
+# its only "0" -- like several other entries -- carried a stray mark
+# picked up from the text line above (see _kkl_char_groups), so it only
+# matched a 0 in the minutes position: every frame with an hour of 00-09
+# UTC, or any 7/8/9, failed here and depended on whole-string Tesseract
+# reading the DATE line correctly too. Measured over those 199 frames:
+# 65 read by templates before, 199 after. With the stray mark removed the
+# font turns out to be fully deterministic -- 13 distinct bitmaps cover
+# every character ever seen (one each for 1-9, ":" and "Z", two for "0").
 _KKL_TIMESTAMP_TEMPLATES: dict[str, list[np.ndarray]] | None = None
 _KKL_TEMPLATE_SIZE = (40, 60)  # (w, h), matches assets/kkl_timestamp_templates.npz
+# Geometry of the 5x-upscaled time line _kkl_char_groups works on: digit
+# ink always spans rows 25-109, and the widest single character is 85 px.
+_KKL_TOP_STRIP_PX = 20    # ink ending above this row is not part of any character
+_KKL_MAX_CHAR_W_PX = 100  # two characters side by side are 160+ px wide
 
 
 def _load_kkl_timestamp_templates() -> dict[str, list[np.ndarray]]:
@@ -939,7 +954,22 @@ def _kkl_char_groups(bw: np.ndarray, min_area: int = 15,
     render as 2-3 disconnected strokes (e.g. "5", and "0"'s hollow centre
     can fully separate into two ink blobs at this threshold/resolution),
     while genuine gaps between different characters are consistently
-    wider -- validated against every archived calibration frame."""
+    wider -- validated against every archived calibration frame.
+
+    Two exceptions to that last sentence, both found once a few days of
+    real frames had accumulated, and both fixed here:
+
+    - Two small marks from the text line above poke into the top of this
+      crop at fixed x-positions, directly over the two MINUTES digits.
+      Merging purely by x-gap glued each mark onto the digit beneath it,
+      which stretched that glyph's box up to row 0 -- so the same digit
+      looked different in the minutes position than anywhere else, and a
+      template taken from one position didn't match the other. Ink lying
+      wholly inside the top strip is now dropped before merging.
+    - "4" is wide enough that the gap to the next character is exactly
+      merge_gap, so "4Z" (any time ending in 4 seconds) merged into one
+      box and the line came out as 8 characters instead of 9. A merge is
+      now refused if the result would be wider than one character."""
     inv = (bw < 128).astype(np.uint8)
     labeled, n = ndimage.label(inv, structure=np.ones((3, 3)))
     boxes = []
@@ -950,11 +980,14 @@ def _kkl_char_groups(bw: np.ndarray, min_area: int = 15,
         x0, x1, y0, y1 = xs.min(), xs.max(), ys.min(), ys.max()
         if x1 < left_margin or x0 > right_margin:
             continue
+        if y1 < _KKL_TOP_STRIP_PX:
+            continue
         boxes.append([x0, x1, y0, y1])
     boxes.sort(key=lambda b: b[0])
     merged: list[list[int]] = []
     for b in boxes:
-        if merged and b[0] - merged[-1][1] <= merge_gap:
+        if (merged and b[0] - merged[-1][1] <= merge_gap
+                and b[1] - merged[-1][0] < _KKL_MAX_CHAR_W_PX):
             merged[-1][1] = max(merged[-1][1], b[1])
             merged[-1][2] = min(merged[-1][2], b[2])
             merged[-1][3] = max(merged[-1][3], b[3])
@@ -1122,7 +1155,13 @@ def extract_observation_time(img: Image.Image, product: str) -> datetime | None:
     if m:
         date_str, time_str, date_fmt = m.group(1), m.group(2), "%d/%m/%Y"
     else:
-        m = re.search(r"(\d{2}:\d{2}:\d{2})\s*UTC\s*/\s*(\d{1,2}\s+\w{3}\s+\d{4})", text)
+        # \D{0,3} before the day: Tesseract occasionally inserts a stray
+        # character there -- "03:17:44 UTC / O02 Oct 2026" on a perfectly
+        # clean NIOT frame (2026-10-02) -- which made the whole timestamp
+        # unreadable even though every real character was read correctly.
+        # A stray that REPLACES a digit instead still fails to parse, or
+        # lands days away and is rejected by the sanity check below.
+        m = re.search(r"(\d{2}:\d{2}:\d{2})\s*UTC\s*/\D{0,3}(\d{1,2}\s+\w{3}\s+\d{4})", text)
         if m:
             date_str, time_str, date_fmt = m.group(2), m.group(1), "%d %b %Y"
         else:
