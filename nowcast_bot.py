@@ -713,50 +713,60 @@ PRODUCTS = {
             (436, 449, 485, 469),   # "100.0 km" label
             (443, 536, 524, 557),   # "0.0 km" label
         ],
-        # This frame's thin state/district border lines (criss-crossing the
-        # whole inland panel, not a small fixed region) happen to render in
-        # shades close enough to this product's own LUT swatches -- a PURE
-        # white border pixel is an EXACT match (dist=0) against the
-        # 41.3-42.5dBZ near-white band, and antialiased border pixels
-        # (blended against the tan terrain basemap underneath) land on
-        # other bands the same way -- so border crossings were reading as
-        # real low/mid-intensity echo across the whole panel. Unlike
-        # koc_maxz's gridlines (which sit in a part of that scale no real
-        # echo should ever render as, so excluding the color outright was
-        # safe), this scale's white/near-white bands ARE legitimate dBZ
-        # values, so neither a color exclude nor a naive "mask every pixel
-        # that's ever white" approach was safe -- an early attempt at the
-        # latter (masking pixels white in every one of several real frames)
-        # also masked out a genuine, geographically-anchored storm sitting
-        # near the coast the whole time window, which is exactly the
-        # signal this pipeline exists to keep.
+        # REBUILT -- the first version of this mask (see git history for
+        # the original comment) only targeted the thin state/district
+        # border lines. Reported directly, with a live screenshot: a much
+        # bigger problem than borders was still getting through -- this
+        # product's whole on-screen basemap is a permanently-visible,
+        # fully-colored LAND/SEA ELEVATION LAYER (tan/gold inland
+        # highlands, green coastal lowland, cyan/blue sea depth shading --
+        # see the frame itself), unlike every other radar here, which only
+        # paints colored pixels where there's real echo. That terrain
+        # layer is rendered as a dithered GIF (a limited color palette
+        # approximating a smooth elevation gradient), and enough of that
+        # dithering lands within DIST_THRESHOLD of a real dBZ swatch that
+        # nearly the entire visible coastline decoded as a solid green/
+        # blue/yellow "storm" the width of the whole state -- confirmed by
+        # sampling real terrain pixels directly and checking their nearest-
+        # swatch distance (plenty under 2). The original line-only mask
+        # never caught this because its final step (binary_opening) was
+        # deliberately built to KEEP wide blob-shaped regions, assuming
+        # only a real storm could be blob-shaped -- exactly backwards for
+        # a terrain layer that's itself one enormous blob.
         #
-        # What actually worked: build the SAME cross-frame persistence
-        # mask (pixels that decode as finite dBZ, any value, in every one
-        # of several real archived frames -- a real storm moves/changes
-        # intensity cycle to cycle and shouldn't stay pinned to the exact
-        # same pixels for the whole span, so persistence alone already
-        # flags mostly-static basemap graphics), then split that
-        # persistence mask by SHAPE, not color: scipy.ndimage.binary_opening
-        # with a 3x3 structuring element (2 iterations) erodes away
-        # anything thinner than ~2px -- true border lines and the dashed
-        # 100/200km range-ring circles -- while leaving wider real storm
-        # blobs intact; only the eroded-away (thin/line-like) remainder is
-        # excluded. Visually confirmed against the real frames: the
-        # resulting mask traces the border/coastline network cleanly and
-        # leaves the real coastal storm untouched. Built from 4 real frames
-        # spanning 11:20-12:10 UTC on 2026-10-01 (the
-        # fetch_calibration_sample.yml sample plus three cycles the live
-        # test pipeline had archived by then) -- cut this one frame's cell
-        # count from 371 (no mask) to 58 (naive white-intersection mask,
-        # still missed antialiased border pixels) to 53 (this shape-based
-        # mask), with the remaining handful concentrated at real echo and
-        # a few border-LINE-INTERSECTION points the opening didn't fully
-        # erode. Only 4 frames/50 minutes of history so far -- worth
-        # regenerating (same method, more/later frames, perhaps one more
-        # opening iteration) if a future cycle still shows a residual
-        # border-crossing false cell.
+        # Fix: drop the shape-based (line vs blob) split entirely and go
+        # back to pure cross-frame persistence, but tolerant rather than
+        # exact -- checking a handful of individual terrain pixels across
+        # frames showed the dithered color at a given spot drifts by only
+        # a few RGB units cycle to cycle (GIF quantization noise), never
+        # matching bit-for-bit, which is why a first attempt at EXACT
+        # per-pixel equality across frames only flagged ~28% of the panel
+        # as static instead of the terrain's real extent. Per pixel: take
+        # the per-channel MEDIAN color across several real archived frames,
+        # then the worst-case (max) Euclidean distance any single frame's
+        # pixel strays from that median; a pixel whose color never strays
+        # more than 12 units from its own median across every sampled
+        # frame is treated as static background (terrain, borders, range
+        # rings all included) and excluded, regardless of its shape or
+        # size -- a real storm moving or changing intensity cycle to cycle
+        # strays much further than that at the pixels it touches, so it
+        # survives. Built from 7 real frames spanning 11:20 UTC on
+        # 2026-10-01 to 22:20 UTC on 2026-10-02 (the
+        # fetch_calibration_sample.yml sample plus six cycles the live
+        # test pipeline had archived by then); visually confirmed against
+        # several of those frames that the huge false coastal blob is gone
+        # and the handful of remaining colored patches match real storm
+        # activity visible over open water in the source GIF. Worth
+        # regenerating (same method, more/later frames, retune the 12-unit
+        # tolerance if needed) once this has run through more real weather
+        # -- and worth checking first whether a future false patch is
+        # terrain that outlasted this mask's sample window or genuine echo
+        # before assuming it's a bug.
         "static_exclude_mask": "masks/mlr_maxz_static_exclude.png",
+        # See decode_reflectivity's erode_thin_residual comment -- cleans
+        # up thin border-line fragments the static mask's tolerance
+        # doesn't catch, without touching real storm blobs.
+        "erode_thin_residual": True,
     },
 }
 
@@ -1472,6 +1482,30 @@ def decode_reflectivity(img: Image.Image, product: str, lut: list) -> np.ndarray
             small_labels = np.flatnonzero(sizes < despeckle_min_px) + 1
             if len(small_labels):
                 dbz[np.isin(labeled, small_labels)] = np.nan
+
+    if cfg.get("erode_thin_residual"):
+        # First needed for mlr_maxz: its static_exclude_mask (a per-pixel
+        # cross-frame tolerance check, see that field's comment) catches
+        # the huge terrain/basemap false-echo blob, but leaves behind thin
+        # squiggly leftover fragments along state/district border lines --
+        # places where antialiasing against the terrain varies by just
+        # enough, frame to frame, to exceed that mask's tolerance even
+        # though the line itself never moves. despeckle_min_px alone can't
+        # clean these up: a border line's total pixel count easily exceeds
+        # any reasonable despeckle floor even though it's only 1-2px WIDE,
+        # so a floor high enough to drop it would also drop real small
+        # storms. binary_opening instead erodes by SHAPE, not size -- it
+        # peels off anything thinner than the 3x3 structuring element
+        # (true lines) while leaving wider real storm blobs intact, the
+        # same shape-vs-color distinction static_exclude_mask's own
+        # original (pre-rebuild) version used, just applied live here
+        # instead of baked into one static frame. Cut this product's
+        # false cell count from 300+ (static mask alone) to single/low-
+        # double digits across every sampled real frame. Opt-in and
+        # generic, same pattern as despeckle_min_px/mask_within_km -- a
+        # no-op for every product that doesn't set it.
+        opened = ndimage.binary_opening(~np.isnan(dbz), structure=np.ones((3, 3)))
+        dbz[~opened] = np.nan
 
     return dbz
 
