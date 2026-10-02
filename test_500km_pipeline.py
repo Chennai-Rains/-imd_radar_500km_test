@@ -96,7 +96,10 @@ from pathlib import Path
 
 import nowcast_bot as nb
 
-TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "koc_maxz", "cni_maxz", "cni_ppz", "mlr_maxz")
+# koc_maxz (Kochi MAXZ) dropped per explicit instruction -- that radar is
+# under maintenance, so polling it would just serve an increasingly stale
+# (or outright broken) frame under a "live" banner. Re-add once it's back.
+TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "cni_maxz", "cni_ppz", "mlr_maxz")
 
 nb.POLLED_PRODUCTS = TEST_PRODUCTS
 nb.ARCHIVE_DIR = Path("archive_500km_test")
