@@ -3296,6 +3296,11 @@ BOT_RAIN_AREA_MIN_KM2 = 20.0        # smaller patches are left in the grid but n
 BOT_MAX_RAIN_AREAS = 100
 BOT_NO_ECHO = 0
 BOT_NO_COVERAGE = 255
+# Products left out of the bot export altogether (they stay on the map).
+# For a radar whose picture is not yet trusted enough to answer questions
+# from: its echo, coverage, cells and motion are all kept out of the grid,
+# and it is listed in "radars" with status "excluded".
+BOT_EXCLUDED_PRODUCTS: tuple = ()
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -3472,8 +3477,9 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     to export."""
     products = products or POLLED_PRODUCTS
     now_utc = now_utc or datetime.now(timezone.utc)
-    fresh = _bot_fresh_products(products, now_utc)
-    lats, lons = _bot_grid_axes(products)
+    included = tuple(p for p in products if p not in BOT_EXCLUDED_PRODUCTS)
+    fresh = _bot_fresh_products(included, now_utc)
+    lats, lons = _bot_grid_axes(included or products)
     lat2d, lon2d = np.meshgrid(lats, lons, indexing="ij")
     step = BOT_GRID_STEP_DEG
 
@@ -3490,7 +3496,9 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             "obs_time_ist": obs.astimezone(_IST).strftime("%d %b %H:%M IST") if obs is not None else None,
             "age_min": round(age, 0) if age is not None else None,
         }
-        if p not in _last_dbz:
+        if p in BOT_EXCLUDED_PRODUCTS:
+            entry.update(status="excluded", used=False, motion="no motion: left out of the bot export")
+        elif p not in _last_dbz:
             entry.update(status="missing", used=False, motion="no motion: no frame this cycle")
         elif p not in fresh:
             entry.update(status="stale", used=False, motion="no motion: frame too old to use")
@@ -3597,7 +3605,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     # ---- fused strong cells: the same ones the map draws ----
     cells_out = []
     fresh_cells = [c for p in fresh for c in _prev_cells.get(p, [])]
-    multi = len({PRODUCT_RADAR[p] for p in products}) > 1
+    multi = len({PRODUCT_RADAR[p] for p in included}) > 1
     for c in (cluster_cells(fresh_cells) if multi else fresh_cells):
         radar = PRODUCT_RADAR.get(c.product)
         site = RADAR_SITES[radar]

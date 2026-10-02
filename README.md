@@ -86,6 +86,12 @@ measured separately from the tracked cells' velocities (see
 back into detection, tracking, state or the map -- `run_pipeline()` calls
 it inside a try/except so it can never stop the map being published.
 
+Mangaluru is drawn on the test map but left out of these two files
+(`BOT_EXCLUDED_PRODUCTS` in `test_500km_pipeline.py`): its frames show
+large echo that stays put from frame to frame, which looks like clutter,
+and the bot would report it as rain. It is listed in the JSON's `radars`
+with status `excluded`.
+
 ## Running it
 
 The workflow (`.github/workflows/nowcast_500km_test.yml`) runs on a
