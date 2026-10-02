@@ -60,6 +60,28 @@ real side-by-side against the Karaikal hybrid is possible -- still no
 decision yet on dropping Karaikal's 500km extension, per the plan to
 compare over a few real days first.
 
+## Bot data export
+
+Every run also writes a data copy of the map for the query bot, uploaded
+next to the test map by the same FTP step:
+
+- `nowcast_bot_500km_test.json` -- which radars were used and how old each
+  frame is, the grid layout, the fused strong cells the map draws, and
+  every connected rain area down to 20 dBZ (the weakest echo IMD's images
+  carry), each with its speed and direction.
+- `nowcast_bot_grid_500km_test.bin.gz` -- reflectivity on a 0.02 degree
+  (~2 km) lat/lon grid: one layer as observed, plus one each for +30, +60
+  and +90 minutes, moved along the measured motion.
+
+The map only carried this as a picture, and tracked cells only exist for
+cores of 30-35 dBZ and above, so lighter rain over a place was not
+readable by anything but a person looking at the map. The JSON's own
+`how_to_read` field documents the byte layout. Motion for these layers is
+measured separately from the tracked cells' velocities (see
+`_bot_optical_flow` in `nowcast_bot.py`), and nothing in the export feeds
+back into detection, tracking, state or the map -- `run_pipeline()` calls
+it inside a try/except so it can never stop the map being published.
+
 ## Running it
 
 The workflow (`.github/workflows/nowcast_500km_test.yml`) runs on a

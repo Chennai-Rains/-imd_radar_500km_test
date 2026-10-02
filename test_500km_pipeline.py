@@ -104,6 +104,11 @@ nb.STATE_FILE = Path("state_500km_test/poll_state.json")
 nb.CELLS_STATE_FILE = Path("state_500km_test/prev_cells.json")
 nb.OBS_TIME_STATE_FILE = Path("state_500km_test/prev_obs_time.json")
 nb.OUTPUT_HTML = Path("output/storm_forecast_map_500km_test.html")
+# Bot data export (see the BOT DATA EXPORT block in nowcast_bot.py) -- same
+# "_500km_test" suffix as the map, so these never collide with the live
+# pipeline's files once that starts writing its own.
+nb.OUTPUT_BOT_JSON = Path("output/nowcast_bot_500km_test.json")
+nb.OUTPUT_BOT_GRID = Path("output/nowcast_bot_grid_500km_test.bin.gz")
 nb.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 nb.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 nb.OUTPUT_HTML.parent.mkdir(parents=True, exist_ok=True)
