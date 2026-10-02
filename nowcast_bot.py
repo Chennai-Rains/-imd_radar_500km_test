@@ -3267,13 +3267,30 @@ OUTPUT_BOT_JSON = Path("output/nowcast_bot.json")
 OUTPUT_BOT_GRID = Path("output/nowcast_bot_grid.bin.gz")
 
 BOT_GRID_STEP_DEG = 0.02            # ~2.2 km; fine enough for a locality, small enough to ship every cycle
-BOT_LEAD_TIMES_MIN = (30, 60, 90)   # same lead times build_forecast_map uses
+# Grid layers every 10 minutes, not just at 30/60/90: a small cell moving at
+# 30 km/h crosses a 5 km circle in about 20 minutes, so with only half-hour
+# snapshots it could pass right over a place between two of them and never
+# show up there (seen in testing: a 3 km cell due over Velachery 8 minutes
+# out read as "dry" at 0, 30, 60 and 90). At 10-minute steps nothing moving
+# under MAX_PLAUSIBLE_CELL_SPEED_KMH can cross that circle unseen. The
+# 0-minute layer is the observed picture moved up to "now" (each radar's
+# frame is 10-45 minutes old by the time this runs).
+BOT_LEAD_TIMES_MIN = (0, 10, 20, 30, 40, 50, 60, 70, 80, 90)
+BOT_CELL_LEAD_TIMES_MIN = (30, 60, 90)   # projected positions listed per cell; same as build_forecast_map
+# A grid node only counts as echo if at least this share of the radar pixels
+# around it have echo. Taking the strongest pixel alone turned every stray
+# pixel into a whole 5 sq km node: three specks about 1 km across came out
+# as a 48 sq km "rain area", and NIOT's 95 m pixels made it worse.
+BOT_MIN_ECHO_FRACTION = 0.25
 # Optical flow between two frames is only trusted when they are a sensible
 # distance apart in time: too close and a one-pixel wobble reads as a fast
 # storm, too far and the pattern has changed too much to match.
 BOT_MOTION_MIN_DT_MIN = 4.0
 BOT_MOTION_MAX_DT_MIN = 45.0
-BOT_MOTION_SMOOTH_KM = 40.0         # how far one storm's measured motion is spread to its surroundings
+# How far one storm's measured motion is spread to its surroundings. 40 km
+# was too far: a stationary patch 53 km from a storm moving at 30 km/h was
+# given 13 km/h of the storm's motion. At 20 km it measures 1 km/h.
+BOT_MOTION_SMOOTH_KM = 20.0
 BOT_MOTION_MIN_ECHO_PX = 25         # fewer echo pixels than this is not enough to measure motion from
 BOT_RAIN_AREA_MIN_KM2 = 20.0        # smaller patches are left in the grid but not listed as an area
 BOT_MAX_RAIN_AREAS = 100
@@ -3335,17 +3352,22 @@ def _bot_pixel_index(product: str, lat2d: np.ndarray, lon2d: np.ndarray, shape: 
 def _bot_regrid_dbz(dbz: np.ndarray, product: str, lat2d: np.ndarray, lon2d: np.ndarray):
     """Product's reflectivity on the common grid: dBZ where there is echo,
     -1 where the radar looks and sees nothing, NaN where it does not look.
-    Each node takes the strongest pixel within roughly one grid cell (not
-    just the single nearest pixel), so a small echo on a fine-resolution
-    product such as NIOT is not skipped over by the coarser grid."""
+    Each node looks at the pixels within roughly one grid cell (not just
+    the single nearest pixel), so a small echo on a fine-resolution product
+    such as NIOT is not skipped over by the coarser grid: it takes the
+    strongest of them, provided enough of them have echo at all
+    (BOT_MIN_ECHO_FRACTION) -- otherwise a lone pixel would be blown up
+    into a whole node."""
     # Window wide enough that every pixel belongs to the window of the node
     # nearest to it (half a grid cell in pixels, plus the half pixel lost to
-    # rounding the node onto the pixel grid) -- so no echo pixel is dropped.
+    # rounding the node onto the pixel grid).
     half_cell_px = BOT_GRID_STEP_DEG * 111.0 * PRODUCTS[product]["km_per_px"] / 2.0
     k = 2 * int(np.floor(half_cell_px + 0.5)) + 1
-    src = np.where(np.isnan(dbz), -1.0, dbz)
+    echo = ~np.isnan(dbz)
+    src = np.where(echo, dbz, -1.0)
     if k > 1:
-        src = ndimage.maximum_filter(src, size=k)
+        share = ndimage.uniform_filter(echo.astype(float), size=k)
+        src = np.where(share >= BOT_MIN_ECHO_FRACTION - 1e-9, ndimage.maximum_filter(src, size=k), -1.0)
     x, y, cover = _bot_pixel_index(product, lat2d, lon2d, dbz.shape)
     out = np.full(lat2d.shape, np.nan)
     out[cover] = src[y[cover], x[cover]]
@@ -3507,7 +3529,20 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
         """Strongest value over all used radars at each node. lead_min None =
         exactly as observed. Otherwise each radar's picture is moved forward
         by (its own age + lead), so every layer refers to the same clock
-        time even though the radars' frames were taken at different times."""
+        time even though the radars' frames were taken at different times.
+
+        Echo is carried FORWARD: every echo node moves along the motion
+        measured at that node. (The first version looked BACKWARD from each
+        destination using the motion at the destination. Where the motion
+        field changes over a short distance -- a stationary shower next to
+        a moving storm -- ground between the two has an in-between motion,
+        looks back, finds the stationary shower and copies it: a ghost
+        echo drifting off a shower that isn't moving. In testing that put
+        a stationary patch 28 km out of place at 90 minutes.)
+
+        Coverage still looks backward: a node counts as "seen, dry" only if
+        the place its weather is coming from was inside radar coverage;
+        otherwise nothing is known about what will arrive there."""
         best = np.full(lat2d.shape, np.nan)
         for p, grid in regridded.items():
             if lead_min is None:
@@ -3519,8 +3554,21 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
                 r = np.round((lats[0] - src_lat) / step).astype(int)
                 c = np.round((src_lon - lons[0]) / step).astype(int)
                 ok = (r >= 0) & (r < grid.shape[0]) & (c >= 0) & (c < grid.shape[1])
-                moved = np.full(grid.shape, np.nan)
-                moved[ok] = grid[r[ok], c[ok]]
+                seen = np.zeros(grid.shape, dtype=bool)
+                seen[ok] = ~np.isnan(grid[r[ok], c[ok]])
+                moved = np.where(seen, -1.0, np.nan)
+
+                er, ec = np.where(np.nan_to_num(grid, nan=-1.0) > 0)
+                if er.size:
+                    dr = np.round(er - V[er, ec] * hours / 111.0 / step).astype(int)   # north is toward row 0
+                    dc = np.round(ec + U[er, ec] * hours / (111.0 * np.cos(np.radians(lat2d[er, ec]))) / step).astype(int)
+                    inb = (dr >= 0) & (dr < grid.shape[0]) & (dc >= 0) & (dc < grid.shape[1])
+                    echo = np.full(grid.shape, -1.0)
+                    np.maximum.at(echo, (dr[inb], dc[inb]), grid[er[inb], ec[inb]])
+                    # nodes that moved by slightly different amounts can leave one-node gaps inside a storm
+                    echo = ndimage.grey_closing(echo, size=3)
+                    arrived = echo > 0
+                    moved[arrived] = echo[arrived]
             best = np.fmax(best, moved)
         return best
 
@@ -3573,7 +3621,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             item["projected"] = {
                 str(lead): [round(float(x), 4) for x in
                             project_forward(*c.centroid_latlon, c.velocity_kmh[0], c.velocity_kmh[1], lead)]
-                for lead in BOT_LEAD_TIMES_MIN}
+                for lead in BOT_CELL_LEAD_TIMES_MIN}
         cells_out.append(item)
 
     # ---- every connected rain area, weak ones included ----
