@@ -109,6 +109,12 @@ nb.OUTPUT_HTML = Path("output/storm_forecast_map_500km_test.html")
 # pipeline's files once that starts writing its own.
 nb.OUTPUT_BOT_JSON = Path("output/nowcast_bot_500km_test.json")
 nb.OUTPUT_BOT_GRID = Path("output/nowcast_bot_grid_500km_test.bin.gz")
+# Mangaluru stays on the test map but is left out of the bot's data: its
+# frames keep showing large echo that does not move from one frame to the
+# next (a ~20,000 sq km patch over the sea west of the coast on 2 Oct 2026),
+# which reads as ground/sea clutter rather than rain, and the bot would
+# report it as rain there. Put it back once that has been cleaned up.
+nb.BOT_EXCLUDED_PRODUCTS = ("mlr_maxz",)
 nb.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 nb.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 nb.OUTPUT_HTML.parent.mkdir(parents=True, exist_ok=True)
