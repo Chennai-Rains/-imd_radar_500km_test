@@ -2579,6 +2579,24 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
     m.get_root().header.add_child(folium.Element(
         "<style>.leaflet-interactive:focus { outline: none; }</style>"
     ))
+    # Reported: Chrome was popping up "Translate this page from
+    # Malagasy?" on load. branca's own Figure template (the thing that
+    # actually emits the <html> tag) hardcodes a bare <html> with no lang
+    # attribute at all, so Chrome's language detector has nothing to go
+    # on and falls back to guessing from the visible text -- station
+    # names, dBZ, IST, short all-caps place labels -- which is exactly
+    # the kind of sparse, abbreviation-heavy text that detector is known
+    # to misread as all sorts of things, Malagasy here. Two independent
+    # fixes, both standard practice for this: an explicit
+    # Content-Language header so a detector that does look has a real
+    # answer, and Google's own documented <meta name="google"
+    # content="notranslate"> tag, which tells Chrome/Google Translate
+    # outright not to offer translation for this page regardless of what
+    # the detector guesses.
+    m.get_root().header.add_child(folium.Element(
+        '<meta http-equiv="Content-Language" content="en">'
+        '<meta name="google" content="notranslate">'
+    ))
 
     for r in radars_shown:
         site = RADAR_SITES[r]
