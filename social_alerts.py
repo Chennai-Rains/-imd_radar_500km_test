@@ -332,63 +332,99 @@ def _tile_mosaic(west, south, east, north, zoom, url_tpl):
     return np.asarray(canvas), ext, ok
 
 
+VIEW_MIN_KM, VIEW_MAX_KM = 45.0, 110.0   # half-width of the map around Chennai
+
+
+def view_half_km(exp: Export, a: Assessment, names: dict) -> float:
+    """How far the map reaches from Chennai: just far enough to hold the storm
+    that is heading here (strong echo as observed now, within the distance it
+    could have travelled to reach the zone at the first-hit time), plus a
+    margin. Not the whole region: a far-off unrelated storm must not shrink
+    everything else."""
+    obs = exp.grid[names["observed"]]
+    d = haversine_km_arr(exp.lats[:, None], exp.lons[None, :], CHENNAI[0], CHENNAI[1])
+    travel = (a.speed_kmh * (a.lead_min or 0) / 60.0 if a.speed_kmh else 90.0) + ZONE_RADIUS_KM + 15.0
+    near = (obs >= ALERT_DBZ) & (obs < 255) & (d <= min(travel, VIEW_MAX_KM))
+    far = float(d[near].max()) if near.any() else 0.0
+    return float(np.clip(max(far * 1.15 + 8.0, ZONE_RADIUS_KM + 12.0), VIEW_MIN_KM, VIEW_MAX_KM))
+
+
 def render_image(exp: Export, a: Assessment, path: Path, tile_url: str | None = None) -> Path:
+    """One large square map, readable on a phone: filled colours are the echo
+    now, the dashed outline is where strong echo is expected at the first-hit
+    time. The map reaches only from Chennai out to the storm."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
     from matplotlib.colors import BoundaryNorm, ListedColormap
 
-    west, east, south, north = 78.7, 81.3, 11.8, 14.4
-    bg, bg_ext, tiles_ok = (None, None, 0)
+    names = {n: i for i, n in enumerate(exp.layer_names)}
+    half = view_half_km(exp, a, names)
+    dlat = half / 111.0
+    dlon = half / (111.0 * math.cos(math.radians(CHENNAI[0])))
+    west, east, south, north = CHENNAI[1] - dlon, CHENNAI[1] + dlon, CHENNAI[0] - dlat, CHENNAI[0] + dlat
+
+    bg, bg_ext = None, None
     if tile_url:
         try:
-            bg, bg_ext, tiles_ok = _tile_mosaic(west - 0.2, south - 0.2, east + 0.2, north + 0.2, 8, tile_url)
+            zoom = 9 if half <= 70 else 8
+            bg, bg_ext, _ = _tile_mosaic(west - 0.05, south - 0.05, east + 0.05, north + 0.05, zoom, tile_url)
         except Exception:
             bg = None
 
     cmap = ListedColormap(["#a8e6a1", "#5fcf6a", "#f4e04d", "#f7a936", "#ee6a2e", "#d62828", "#a4133c", "#7b2cbf"])
-    norm = BoundaryNorm([20, 25, 30, 35, 40, 45, 50, 55, 200], cmap.N)
+    bounds = [20, 25, 30, 35, 40, 45, 50, 55, 70]
+    norm = BoundaryNorm(bounds, cmap.N)
 
     lead_then = a.lead_min if (a.lead_min and a.lead_min > 0) else 30
-    wanted = [("Now", 0), (f"+{lead_then} min", lead_then)]
-    names = {n: i for i, n in enumerate(exp.layer_names)}
+    now_key, then_key = "observed", f"plus_{lead_then}"
+    now_layer = exp.grid[names["plus_0"] if "plus_0" in names else names[now_key]].astype(float)
+    then_layer = exp.grid[names[then_key]].astype(float) if then_key in names else None
 
-    def layer_for(lead):
-        key = f"plus_{lead}"
-        return exp.grid[names[key]] if key in names else exp.grid[names["observed"]]
-
-    fig, axes = plt.subplots(1, 2, figsize=(10.4, 5.6), dpi=110)
+    halo = [pe.withStroke(linewidth=4, foreground="white")]
+    fig, ax = plt.subplots(figsize=(7.2, 7.8), dpi=150)
+    if bg is not None:
+        ax.imshow(bg, extent=bg_ext, origin="upper", interpolation="bilinear", zorder=0)
+    else:
+        ax.set_facecolor("#e2e8ec")
     X, Y = _mx(exp.lons), _my(exp.lats)
-    ring_t = np.linspace(0, 2 * math.pi, 120)
-    ring_lat = CHENNAI[0] + (ZONE_RADIUS_KM / 111.0) * np.sin(ring_t)
-    ring_lon = CHENNAI[1] + (ZONE_RADIUS_KM / (111.0 * math.cos(math.radians(CHENNAI[0])))) * np.cos(ring_t)
-    for ax, (title, lead) in zip(axes, wanted):
-        if bg is not None:
-            ax.imshow(bg, extent=bg_ext, origin="upper", interpolation="bilinear", zorder=0)
-        else:
-            ax.set_facecolor("#e2e8ec")
-        g = layer_for(lead).astype(float)
-        vals = np.ma.masked_where((g < 20) | (g >= 255), g)
-        ax.pcolormesh(X, Y, vals, cmap=cmap, norm=norm, shading="nearest", alpha=0.82, zorder=2)
-        ax.plot(_mx(ring_lon), _my(ring_lat), color="#222", lw=1.0, ls="--", zorder=3)
-        ax.plot([_mx(CHENNAI[1])], [_my(CHENNAI[0])], marker="o", ms=6, mfc="white", mec="black", zorder=4)
-        ax.annotate("Chennai", (_mx(CHENNAI[1]), _my(CHENNAI[0])), xytext=(7, -12), textcoords="offset points",
-                    fontsize=9, fontweight="bold", zorder=5)
-        ax.set_xlim(_mx(west), _mx(east))
-        ax.set_ylim(_my(south), _my(north))
-        ax.set_aspect("equal")
-        ax.set_xticks([]); ax.set_yticks([])
-        when = exp.generated_utc + timedelta(minutes=lead)
-        ax.set_title(f"{title}  ({fmt_time(when)} IST)", fontsize=11, fontweight="bold")
+    vals = np.ma.masked_where((now_layer < 20) | (now_layer >= 255), now_layer)
+    mesh = ax.pcolormesh(X, Y, vals, cmap=cmap, norm=norm, shading="nearest", alpha=0.85, zorder=2)
+    if then_layer is not None:
+        strong = ((then_layer >= ALERT_DBZ) & (then_layer < 255)).astype(float)
+        if strong.any():
+            ax.contour(X, Y, strong, levels=[0.5], colors="black", linewidths=3.0, linestyles="--", zorder=4)
+
+    t = np.linspace(0, 2 * math.pi, 120)
+    ax.plot(_mx(CHENNAI[1] + dlon * 0 + (ZONE_RADIUS_KM / (111.0 * math.cos(math.radians(CHENNAI[0])))) * np.cos(t)),
+            _my(CHENNAI[0] + (ZONE_RADIUS_KM / 111.0) * np.sin(t)),
+            color="#1a1a1a", lw=2.0, ls=":", zorder=3)
+    ax.plot([_mx(CHENNAI[1])], [_my(CHENNAI[0])], marker="o", ms=11, mfc="white", mec="black", mew=2.5, zorder=5)
+    ax.annotate("Chennai", (_mx(CHENNAI[1]), _my(CHENNAI[0])), xytext=(12, -22), textcoords="offset points",
+                fontsize=19, fontweight="bold", zorder=6, path_effects=halo)
+    ax.set_xlim(_mx(west), _mx(east))
+    ax.set_ylim(_my(south), _my(north))
+    ax.set_aspect("equal")
+    ax.set_xticks([]); ax.set_yticks([])
+    for sp in ax.spines.values():
+        sp.set_linewidth(1.5)
+
     sev, _ = severity_label(a.max_dbz)
-    fig.suptitle(f"Chennai radar nowcast: {sev} echoes up to ~{a.max_dbz:.0f} dBZ", fontsize=13, fontweight="bold")
-    fig.text(0.5, 0.012,
-             "Extrapolation of current storm motion from IMD radar data, not a guaranteed forecast.  "
-             "chennairains.com   Map: © OpenStreetMap contributors © CARTO",
-             ha="center", fontsize=7.5, color="#444")
-    fig.tight_layout(rect=(0, 0.03, 1, 0.95))
+    now_t = fmt_time(exp.generated_utc)
+    then_t = fmt_time(exp.generated_utc + timedelta(minutes=lead_then))
+    fig.suptitle(f"Chennai radar nowcast: {sev} echoes", fontsize=20, fontweight="bold", y=0.985)
+    ax.set_title(f"Colours: now, {now_t} IST     Dashed outline: ~{then_t} IST", fontsize=13.5, pad=8)
+    cb = fig.colorbar(mesh, ax=ax, orientation="horizontal", fraction=0.045, pad=0.025, ticks=[20, 30, 40, 50])
+    cb.ax.tick_params(labelsize=13)
+    cb.set_label("radar echo strength (dBZ)", fontsize=13)
+    fig.text(0.5, 0.008,
+             "Extrapolated from current storm motion, not a guaranteed forecast.  chennairains.com\n"
+             "IMD radar data. Map: © OpenStreetMap contributors © CARTO",
+             ha="center", fontsize=10, color="#333", linespacing=1.4)
+    fig.subplots_adjust(left=0.03, right=0.97, top=0.91, bottom=0.11)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=110)
+    fig.savefig(path, dpi=150)
     plt.close(fig)
     return Path(path)
 
