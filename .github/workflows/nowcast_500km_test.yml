@@ -44,6 +44,12 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run one-off test pipeline (Karaikal on kkl_ppz/500km, NIOT + Kochi unchanged)
+        # Telegram secrets feed the SHADOW-MODE alert drafts (social_alerts.py,
+        # called at the end of test_500km_pipeline.py): a private review chat,
+        # nothing public. Unset -> the draft is only printed in the log.
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python test_500km_pipeline.py
 
       - name: Rebase onto latest main before committing
@@ -71,7 +77,7 @@ jobs:
         continue-on-error: true
         with:
           commit_message: "Update 500km test tracking state"
-          file_pattern: "state_500km_test/ archive_500km_test/"
+          file_pattern: "state_500km_test/ archive_500km_test/ state_social_test/"
           commit_user_name: "nowcast-bot"
           commit_user_email: "actions@users.noreply.github.com"
 

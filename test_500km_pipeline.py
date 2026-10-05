@@ -126,3 +126,16 @@ nb.OUTPUT_HTML.parent.mkdir(parents=True, exist_ok=True)
 # load_prev_cells()/load_prev_obs_time() (which read POLLED_PRODUCTS,
 # already patched above), so no need to touch those globals separately.
 nb.run_pipeline()
+
+# Social-media storm alerts, SHADOW MODE: drafts a post (text + image) when
+# strong echo is over/heading for Chennai and sends it ONLY to a private
+# Telegram chat for review -- nothing is published publicly. Reads the bot
+# export run_pipeline() just wrote; never allowed to affect the map or state.
+# Needs TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID repo secrets to actually send
+# (without them it just prints the draft). See social_alerts.py.
+try:
+    import social_alerts
+    social_alerts.run(nb.OUTPUT_BOT_JSON, nb.OUTPUT_BOT_GRID, Path("state_social_test"),
+                      tile_url=getattr(nb, "CARTO_VOYAGER_URL", None))
+except Exception as e:
+    print(f"[social] failed (the map and tracking above are unaffected): {e!r}")
