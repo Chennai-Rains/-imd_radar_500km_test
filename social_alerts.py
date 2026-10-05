@@ -422,7 +422,7 @@ def render_image(exp: Export, a: Assessment, path: Path, tile_url: str | None = 
              "Extrapolated from current storm motion, not a guaranteed forecast.  chennairains.com\n"
              "IMD radar data. Map: © OpenStreetMap contributors © CARTO",
              ha="center", fontsize=10, color="#333", linespacing=1.4)
-    fig.subplots_adjust(left=0.03, right=0.97, top=0.91, bottom=0.11)
+    fig.subplots_adjust(left=0.03, right=0.97, top=0.91, bottom=0.15)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
