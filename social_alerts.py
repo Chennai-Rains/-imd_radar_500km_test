@@ -42,7 +42,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 CHENNAI = (13.0827, 80.2707)
 ZONE_RADIUS_KM = 40.0      # "Chennai area": city + immediate suburbs
 ALERT_DBZ = 35.0           # grid node counts as strong echo at/above this
-MIN_ZONE_NODES = 3         # grid step is ~2.2 km (~5 km2/node); fewer nodes is a speck, not a storm
+MIN_ZONE_NODES = 8         # grid step is ~2.2 km (~5 km2/node), so ~40 km2 of strong echo; 6 nodes on the zone edge was a real false alarm (5 Oct)
 MAX_LEAD_MIN = 90          # the export carries layers out to +90 min
 
 # --- trust: when NOT to say anything -----------------------------------------
@@ -195,21 +195,30 @@ def assess(exp: Export, now_utc: datetime) -> Assessment:
                    when_utc=exp.generated_utc + timedelta(minutes=first),
                    extra={"coverage": round(float(cover), 2)})
 
-    # Where is it coming from / going: the nearest strong rain area's own motion.
+    # Where is it coming from / going: only a rain area whose own motion
+    # actually carries it into the zone at the time of the first hit. (The
+    # first version took the NEAREST strong area, which on 5 Oct was a big
+    # Tirupati storm that was not the thing heading for Chennai.)
     best = None
     for ar in doc.get("rain_areas", []):
-        if not ar.get("has_strong_core") or ar.get("max_dbz", 0) < ALERT_DBZ:
-            continue
-        dist = float(haversine_km_arr(ar["lat"], ar["lon"], CHENNAI[0], CHENNAI[1]))
-        if dist <= 250 and (best is None or dist < best[0]):
-            best = (dist, ar)
-    if best is not None:
-        dist, ar = best
-        if dist > 10 and first > 0:
-            a.from_dir = compass(bearing_deg(CHENNAI[0], CHENNAI[1], ar["lat"], ar["lon"]))
         sp, br = ar.get("speed_kmh"), ar.get("bearing_deg")
-        if sp is not None and br is not None and sp >= 5:
-            a.speed_kmh, a.toward_dir = float(sp), compass(float(br))
+        if not ar.get("has_strong_core") or ar.get("max_dbz", 0) < ALERT_DBZ or sp is None or br is None or sp < 5:
+            continue
+        # position of the area at the first-hit time, moved along its own motion
+        d_km = sp * first / 60.0
+        plat = ar["lat"] + d_km * math.cos(math.radians(br)) / 111.0
+        plon = ar["lon"] + d_km * math.sin(math.radians(br)) / (111.0 * math.cos(math.radians(ar["lat"])))
+        reach = ZONE_RADIUS_KM + min(math.sqrt(ar.get("area_km2", 0) / math.pi), 60.0)
+        d_then = float(haversine_km_arr(plat, plon, CHENNAI[0], CHENNAI[1]))
+        if d_then <= reach:
+            d_now = float(haversine_km_arr(ar["lat"], ar["lon"], CHENNAI[0], CHENNAI[1]))
+            if best is None or d_then < best[0]:
+                best = (d_then, d_now, ar)
+    if best is not None:
+        _, d_now, ar = best
+        if d_now > 10 and first > 0:
+            a.from_dir = compass(bearing_deg(CHENNAI[0], CHENNAI[1], ar["lat"], ar["lon"]))
+        a.speed_kmh, a.toward_dir = float(ar["speed_kmh"]), compass(float(ar["bearing_deg"]))
     if a.speed_kmh is None:
         m = doc.get("motion", {})
         if m.get("available") and (m.get("overall_speed_kmh") or 0) >= 5:
