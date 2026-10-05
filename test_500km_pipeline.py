@@ -92,6 +92,7 @@ an initial attempt mistook a coastline-dash artifact for one) and for the
 UNVERIFIED status of its site_lat/site_lon (a public estimate, not yet
 measured from the image's own geometry the way kochi/chennai's were).
 """
+import os
 from pathlib import Path
 
 import nowcast_bot as nb
@@ -135,6 +136,10 @@ nb.run_pipeline()
 # (without them it just prints the draft). See social_alerts.py.
 try:
     import social_alerts
+    if os.environ.get("SOCIAL_TEST_DRAFT") == "true":
+        # Manual dispatch with "send_test_draft" ticked: one made-up draft to
+        # prove the Telegram link works, independent of real weather.
+        social_alerts.send_test_draft(tile_url=getattr(nb, "CARTO_VOYAGER_URL", None))
     social_alerts.run(nb.OUTPUT_BOT_JSON, nb.OUTPUT_BOT_GRID, Path("state_social_test"),
                       tile_url=getattr(nb, "CARTO_VOYAGER_URL", None))
 except Exception as e:

@@ -5,7 +5,12 @@ on:
   # pinger calls this workflow's workflow_dispatch API endpoint every
   # 15 minutes (see README for setup). workflow_dispatch also lets you
   # trigger a run manually from the Actions tab any time.
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      send_test_draft:
+        description: "Also send one made-up test draft to Telegram (checks the link, no real weather)"
+        type: boolean
+        default: false
 
 # Only one run at a time, same reasoning as the live repo: cheap insurance
 # against two runs racing to commit/push state_500km_test/archive_500km_test
@@ -50,6 +55,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SOCIAL_TEST_DRAFT: ${{ inputs.send_test_draft }}
         run: python test_500km_pipeline.py
 
       - name: Rebase onto latest main before committing

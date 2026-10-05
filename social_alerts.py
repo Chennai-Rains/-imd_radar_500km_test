@@ -411,6 +411,44 @@ def send_telegram(caption: str, image_path: Path | None) -> bool:
         return False
 
 
+# --- one-off link check ------------------------------------------------------------------
+def send_test_draft(tile_url: str | None = None, sender=send_telegram) -> bool:
+    """Sends a clearly-labelled draft built from a made-up storm 85 km SW of
+    Chennai, to check the Telegram link and the map background end to end
+    without waiting for real weather. Touches no state and no log."""
+    import tempfile
+    now = datetime.now(timezone.utc)
+    step, lat_n, lon_w, nr, nc = 0.02, 15.0, 78.0, 200, 200
+    lats, lons = lat_n - np.arange(nr) * step, lon_w + np.arange(nc) * step
+    LAT, LON = np.meshgrid(lats, lons, indexing="ij")
+    coslat = math.cos(math.radians(13.0))
+    names, leads, layers = ["observed"], [0], [np.zeros((nr, nc), np.uint8)]
+    for lead in range(0, 100, 10):
+        km = 85.0 - 35.0 * lead / 60.0
+        cy = CHENNAI[0] - km * math.cos(math.radians(45)) / 111.0
+        cx = CHENNAI[1] - km * math.sin(math.radians(45)) / (111.0 * coslat)
+        dist = np.hypot((LAT - cy) * 111.0, (LON - cx) * 111.0 * coslat)
+        core = np.clip(47.0 - dist * 0.9, 0, 254)
+        names.append(f"plus_{lead}"); leads.append(lead)
+        layers.append(np.where(core >= 20, core, 0).astype(np.uint8))
+    layers[0] = layers[1]
+    doc = {"generated_utc": now.isoformat(timespec="seconds"), "radars": [], "rain_areas": [], "motion": {}}
+    exp = Export(doc, np.stack(layers), lats, lons, names, leads, now)
+    a = Assessment("approaching", "test", lead_min=60, max_dbz=47.0, zone_nodes=6,
+                   when_utc=now + timedelta(minutes=60), from_dir="SW", toward_dir="NE", speed_kmh=35.0)
+    text = build_text(a, exp)
+    png = None
+    try:
+        png = render_image(exp, a, Path(tempfile.mkdtemp()) / "test_draft.png", tile_url)
+    except Exception as e:
+        print(f"[social] test image failed: {e!r}")
+    caption = ("TEST DRAFT -- made-up storm, only checking the Telegram link and map background. "
+               "Nothing here is real weather.\n\n" + text)
+    ok = sender(caption, png)
+    print(f"[social] test draft {'sent' if ok else 'NOT sent'}")
+    return bool(ok)
+
+
 # --- orchestration -----------------------------------------------------------------------
 def _append_log(path: Path, entry: dict) -> None:
     lines = []
