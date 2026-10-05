@@ -385,12 +385,29 @@ def render_image(exp: Export, a: Assessment, path: Path, tile_url: str | None = 
 
 
 # --- sending ---------------------------------------------------------------------------
+TELEGRAM_STATUS_FILE = Path("state_social_test/telegram_last.json")
+
+
+def _record_telegram(ok: bool, detail: str) -> None:
+    """Leaves the last Telegram outcome in the repo (no secrets) so a missing
+    message can be diagnosed without access to the run log."""
+    try:
+        TELEGRAM_STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TELEGRAM_STATUS_FILE.write_text(json.dumps(
+            {"t": datetime.now(timezone.utc).isoformat(timespec="seconds"), "ok": ok, "detail": detail}, indent=1))
+    except Exception:
+        pass
+
+
 def send_telegram(caption: str, image_path: Path | None) -> bool:
     """True only if Telegram accepted it. No credentials -> False (a dry run,
     never an error), so state is not marked as posted."""
-    token, chat = os.environ.get("TELEGRAM_BOT_TOKEN", ""), os.environ.get("TELEGRAM_CHAT_ID", "")
+    token, chat = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(), os.environ.get("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat:
-        print("[social] TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID not set -- draft only, nothing sent")
+        missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", token), ("TELEGRAM_CHAT_ID", chat)) if not v]
+        msg = f"secret(s) empty or not visible to this repo's workflow: {', '.join(missing)}"
+        print(f"[social] {msg} -- draft only, nothing sent")
+        _record_telegram(False, msg)
         return False
     caption = caption[:1020]
     try:
@@ -403,11 +420,14 @@ def send_telegram(caption: str, image_path: Path | None) -> bool:
             r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                               data={"chat_id": chat, "text": caption}, timeout=30)
         ok = r.ok and r.json().get("ok", False)
+        detail = "sent" if ok else f"Telegram refused: HTTP {r.status_code} {r.text[:200]}"
         if not ok:
-            print(f"[social] Telegram refused the draft: {r.status_code} {r.text[:200]}")
+            print(f"[social] {detail}")
+        _record_telegram(bool(ok), detail)
         return bool(ok)
     except Exception as e:
         print(f"[social] Telegram send failed: {e!r}")
+        _record_telegram(False, f"request failed: {type(e).__name__}")
         return False
 
 
