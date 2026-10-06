@@ -521,17 +521,24 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
     # placed a little ahead of each moving strong rain area, pointing along its bearing.
     from matplotlib.markers import MarkerStyle
     tri = np.array([[0, 1.0], [-0.73, -0.73], [0, -0.27], [0.73, -0.73], [0, 1.0]])
-    n_arrows = 0
-    for ar in exp.doc.get("rain_areas", []):
-        sp, br = ar.get("speed_kmh"), ar.get("bearing_deg")
-        if sp is None or br is None or sp < 5 or ar.get("max_dbz", 0) < 30:
+    n_arrows, drawn = 0, []
+    # Exactly the cells the radar page draws arrows for (export "cells", motion_reliable),
+    # at the same spot: 16.5 min (0.55 x the 30 min lead) ahead of the cell along its bearing.
+    for c in sorted(exp.doc.get("cells", []), key=lambda c: -c.get("area_km2", 0)):
+        sp, br = c.get("speed_kmh"), c.get("bearing_deg")
+        if not c.get("motion_reliable") or sp is None or br is None:
             continue
-        a_lat = ar["lat"] + (sp * 0.4 * math.cos(math.radians(br))) / 111.0
-        a_lon = ar["lon"] + (sp * 0.4 * math.sin(math.radians(br))) / (111.0 * math.cos(math.radians(ar["lat"])))
+        a_lat = c["lat"] + (sp * 0.275 * math.cos(math.radians(br))) / 111.0
+        a_lon = c["lon"] + (sp * 0.275 * math.sin(math.radians(br))) / (111.0 * math.cos(math.radians(c["lat"])))
         if not (west < a_lon < east and south < a_lat < north):
             continue
-        ax.plot([_mx(a_lon)], [_my(a_lat)], marker=MarkerStyle(tri).rotated(deg=-br), ms=19,
-                mfc="#222222", mec="white", mew=1.6, linestyle="none", zorder=7)
+        fx = (_mx(a_lon) - _mx(west)) / (_mx(east) - _mx(west))
+        fy = (_my(a_lat) - _my(south)) / (_my(north) - _my(south))
+        if any(abs(fx - px) < 0.035 and abs(fy - py) < 0.035 for px, py in drawn):
+            continue                 # thinned like the page does when zoomed out
+        drawn.append((fx, fy))
+        ax.plot([_mx(a_lon)], [_my(a_lat)], marker=MarkerStyle(tri).rotated(deg=-br), ms=14,
+                mfc="#333333", mec="white", mew=1.4, linestyle="none", zorder=7)
         n_arrows += 1
     placed = []                      # label centres already drawn, as fractions of the map box
     for h in hits[:8]:
@@ -639,10 +646,12 @@ def synthetic_export(now: datetime, storms: list[dict]) -> Export:
     for s in storms:
         areas.append({"lat": s["lat"], "lon": s["lon"], "area_km2": math.pi * s["radius"] ** 2, "max_dbz": s["peak"],
                       "has_strong_core": True, "speed_kmh": s["speed"], "bearing_deg": s["toward"]})
+    cells = [{"lat": a["lat"], "lon": a["lon"], "area_km2": a["area_km2"], "max_dbz": a["max_dbz"],
+              "speed_kmh": a["speed_kmh"], "bearing_deg": a["bearing_deg"], "motion_reliable": True} for a in areas]
     names.insert(0, "observed"); leads.insert(0, 0); layers.insert(0, layers[0])
     doc = {"generated_utc": now.isoformat(timespec="seconds"),
            "radars": [{"product": "kkl_maxz", "radar": "karaikal", "used": True, "age_min": 10.0}],
-           "rain_areas": areas, "motion": {}}
+           "rain_areas": areas, "cells": cells, "motion": {}}
     return Export(doc, np.stack(layers), lats, lons, names, leads, now)
 
 
