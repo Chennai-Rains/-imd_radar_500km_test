@@ -1,23 +1,33 @@
-"""Chennai-area storm alerts for social media -- SHADOW MODE.
+"""Tamil Nadu storm alerts for social media -- SHADOW MODE.
 
 Reads the bot data export the pipeline already writes every cycle
 (nowcast_bot*.json + the gzip'd reflectivity grid with its 10-minute-step
-"moved along the measured motion" layers), decides whether strong echo is
-over or about to reach Chennai, and if so drafts ONE short post (text <= 280
-characters, so the same wording works on X, Facebook and a WhatsApp Channel)
-plus a two-panel image (now / expected). In shadow mode the draft goes only
-to a private Telegram chat for review -- nothing is published anywhere
-public. Posting to X / Facebook comes later, behind its own switch, once the
-calls have been checked against real storm days.
+"moved along the measured motion" layers) and decides, region by region,
+whether strong echo is over or about to reach it. Regions are Chennai (a 40 km
+zone, as before) plus every Tamil Nadu district (outlines in
+assets/tn_districts.geojson, used only to say which district an echo lies in).
+
+Each cycle produces AT MOST ONE post: a digest of every region currently
+affected, e.g. "strong echoes over Villupuram, Cuddalore; heading for
+Thanjavur (~4:10 PM)". Text is <= 280 characters so the same wording works on
+X, Facebook and a WhatsApp Channel, and comes with one map cropped to just
+the storms involved. In shadow mode the draft goes only to a private
+Telegram chat for review -- nothing is published anywhere public. Posting to
+X / Facebook comes later, behind its own switch, after the calls have been
+checked against real storm days.
+
+How a widespread day stays readable: a region is announced once per
+"episode" (until it has been quiet for CLEAR_AFTER_MIN), later posts only
+happen for new regions or when one is upgraded from "heading for" to "over",
+posts are at least GLOBAL_MIN_GAP_MIN apart, and there is a daily cap.
+Regions that don't fit in one post stay un-announced and are picked up by the
+next one.
 
 Deliberately decoupled from nowcast_bot.py: it only reads the export files,
 so it can be run, tested and tuned without touching detection or the map,
 and run() can never take the pipeline down (the caller wraps it in
-try/except as well).
-
-What it does NOT do: it never claims rain, only "strong radar echoes"; the
-dBZ -> wording is in severity_label(). Everything tunable is a constant
-right below, so tuning after a few storm days is a one-line change.
+try/except as well). It never claims rain, only "strong radar echoes".
+Everything tunable is a constant below.
 
 Every cycle appends one line to decision_log.jsonl (what it saw, what it
 decided, why) so "why didn't it fire?" can be answered from the repo.
@@ -37,25 +47,36 @@ import numpy as np
 import requests
 
 IST = timezone(timedelta(hours=5, minutes=30))
+HERE = Path(__file__).resolve().parent
+TN_GEOJSON = HERE / "assets" / "tn_districts.geojson"
 
 # --- where / how strong ------------------------------------------------------
 CHENNAI = (13.0827, 80.2707)
-ZONE_RADIUS_KM = 40.0      # "Chennai area": city + immediate suburbs
+CHENNAI_ZONE_KM = 40.0     # "Chennai": city + immediate suburbs (the old single zone)
 ALERT_DBZ = 35.0           # grid node counts as strong echo at/above this
-MIN_ZONE_NODES = 8         # grid step is ~2.2 km (~5 km2/node), so ~40 km2 of strong echo; 6 nodes on the zone edge was a real false alarm (5 Oct)
+MIN_REGION_NODES = 8       # grid step is ~2.2 km (~5 km2/node): ~40 km2 of strong echo. 6 nodes on an edge was a real false alarm (5 Oct)
 MAX_LEAD_MIN = 90          # the export carries layers out to +90 min
+
+# Names as the audience writes them (the boundary file uses other spellings).
+RENAME = {"Thiruvallur": "Tiruvallur", "Viluppuram": "Villupuram", "Thoothukkudi": "Thoothukudi",
+          "Tirupathur": "Tirupattur", "Thiruvarur": "Tiruvarur"}
+SKIP_DISTRICTS = {"Chennai"}   # covered by the Chennai zone, which is the same ground
 
 # --- trust: when NOT to say anything -----------------------------------------
 MAX_EXPORT_AGE_MIN = 30    # export itself older than this -> pipeline is not running properly
 MAX_RADAR_AGE_MIN = 40     # freshest radar frame older than this -> nowcast is not "now"
-MIN_ZONE_COVERAGE = 0.5    # share of the zone inside radar coverage; no coverage != dry, so stay quiet
+MIN_REGION_COVERAGE = 0.5  # share of a region inside radar coverage; no coverage != dry, so stay quiet there
 
 # --- how often ----------------------------------------------------------------
-CLEAR_AFTER_MIN = 45       # zone must be quiet this long before the next storm counts as a NEW episode
-MIN_GAP_MIN = 30           # minimum time between two posts inside one episode
+CLEAR_AFTER_MIN = 45       # a region must be quiet this long before a new storm there is a NEW episode
+MIN_GAP_MIN = 30           # minimum time between two posts about the same region
+GLOBAL_MIN_GAP_MIN = 20    # minimum time between any two posts
+MAX_POSTS_PER_DAY = 12     # safety cap while in shadow mode (IST calendar day)
+MAX_NAMED_REGIONS = 6      # a post names at most this many; the rest become "+N more districts" (and count as announced)
 
 DECISION_LOG_MAX_LINES = 1500
 DRAFTS_KEEP = 30
+HASHTAGS = "#TNRains #ChennaiRains"
 
 SEVERITY = [(50.0, "very strong", 3), (40.0, "strong", 2), (35.0, "moderate-to-strong", 1)]
 
@@ -84,17 +105,8 @@ def haversine_km_arr(lat1, lon1, lat2, lon2):
     return 2 * r * np.arcsin(np.sqrt(a))
 
 
-def bearing_deg(lat1, lon1, lat2, lon2) -> float:
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dl = math.radians(lon2 - lon1)
-    y = math.sin(dl) * math.cos(p2)
-    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
-    return math.degrees(math.atan2(y, x)) % 360
-
-
 def fmt_time(dt: datetime) -> str:
-    s = dt.astimezone(IST).strftime("%I:%M %p").lstrip("0")
-    return s
+    return dt.astimezone(IST).strftime("%I:%M %p").lstrip("0")
 
 
 # --- reading the export --------------------------------------------------------
@@ -131,37 +143,108 @@ def load_export(json_path: Path, grid_path: Path) -> Export | None:
     )
 
 
-# --- the decision ---------------------------------------------------------------
+# --- regions ---------------------------------------------------------------------
+@dataclass
+class Region:
+    name: str
+    rs: slice                  # rows / cols of the bounding box on the export grid
+    cs: slice
+    sub: np.ndarray            # bool mask inside that box
+    n: int                     # nodes in the region
+
+    @property
+    def min_nodes(self) -> int:
+        # a small region can't hold 8 strong nodes without being all echo
+        return max(3, min(MIN_REGION_NODES, int(0.25 * self.n)))
+
+
+def _box(lats, lons, south, north, west, east):
+    # lats run north -> south
+    r0 = int(np.searchsorted(-lats, -north, side="left"))
+    r1 = int(np.searchsorted(-lats, -south, side="right"))
+    c0 = int(np.searchsorted(lons, west, side="left"))
+    c1 = int(np.searchsorted(lons, east, side="right"))
+    return slice(r0, r1), slice(c0, c1)
+
+
+def _polygon_mask(polys, LAT, LON):
+    from matplotlib.path import Path as MPath
+    pts = np.column_stack([LON.ravel(), LAT.ravel()])
+    out = np.zeros(LAT.size, dtype=bool)
+    for rings in polys:
+        m = MPath(np.asarray(rings[0])).contains_points(pts)
+        for hole in rings[1:]:
+            m &= ~MPath(np.asarray(hole)).contains_points(pts)
+        out |= m
+    return out.reshape(LAT.shape)
+
+
+def build_regions(lats, lons, geojson_path: Path = TN_GEOJSON) -> list[Region]:
+    """Chennai zone first, then the districts that have at least one node on the grid."""
+    regions = []
+    dlat = CHENNAI_ZONE_KM / 111.0
+    dlon = CHENNAI_ZONE_KM / (111.0 * math.cos(math.radians(CHENNAI[0])))
+    rs, cs = _box(lats, lons, CHENNAI[0] - dlat, CHENNAI[0] + dlat, CHENNAI[1] - dlon, CHENNAI[1] + dlon)
+    if rs.stop > rs.start and cs.stop > cs.start:
+        LAT, LON = np.meshgrid(lats[rs], lons[cs], indexing="ij")
+        sub = haversine_km_arr(LAT, LON, CHENNAI[0], CHENNAI[1]) <= CHENNAI_ZONE_KM
+        if sub.any():
+            regions.append(Region("Chennai", rs, cs, sub, int(sub.sum())))
+    gj = json.loads(Path(geojson_path).read_text())
+    for f in gj["features"]:
+        raw = f["properties"]["district"]
+        if raw in SKIP_DISTRICTS:
+            continue
+        geom = f["geometry"]
+        polys = [geom["coordinates"]] if geom["type"] == "Polygon" else geom["coordinates"]
+        pts = np.array([p for poly in polys for p in poly[0]])
+        rs, cs = _box(lats, lons, pts[:, 1].min(), pts[:, 1].max(), pts[:, 0].min(), pts[:, 0].max())
+        if rs.stop <= rs.start or cs.stop <= cs.start:
+            continue
+        LAT, LON = np.meshgrid(lats[rs], lons[cs], indexing="ij")
+        sub = _polygon_mask(polys, LAT, LON)
+        if sub.any():
+            regions.append(Region(RENAME.get(raw, raw), rs, cs, sub, int(sub.sum())))
+    return regions
+
+
+# --- the assessment ----------------------------------------------------------------
+@dataclass
+class Hit:
+    name: str
+    status: str                # "over" | "approaching"
+    lead_min: int              # first lead at which strong echo is in the region (0 = now)
+    max_dbz: float
+    nodes: int                 # strong nodes at that lead
+    when_utc: datetime
+    lat: float                 # centre of the strong echo in the region at that lead
+    lon: float
+
+
 @dataclass
 class Assessment:
-    status: str                       # "none" | "approaching" | "over" | "no_data"
+    ok: bool
     reason: str
-    lead_min: int | None = None       # first lead at which strong echo is in the zone (0 = now)
-    max_dbz: float = 0.0
-    zone_nodes: int = 0
-    when_utc: datetime | None = None
-    from_dir: str | None = None       # where it is coming from, e.g. "SW"
-    toward_dir: str | None = None
-    speed_kmh: float | None = None
-    extra: dict = field(default_factory=dict)
+    hits: list = field(default_factory=list)
+    uncovered: list = field(default_factory=list)
+    n_regions: int = 0
 
 
-def assess(exp: Export, now_utc: datetime) -> Assessment:
+def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) -> Assessment:
     doc = exp.doc
     age = (now_utc - exp.generated_utc).total_seconds() / 60.0
     if age > MAX_EXPORT_AGE_MIN:
-        return Assessment("no_data", f"export is {age:.0f} min old")
+        return Assessment(False, f"export is {age:.0f} min old")
     used = [r for r in doc.get("radars", []) if r.get("used")]
     if not used:
-        return Assessment("no_data", "no radar in use this cycle")
+        return Assessment(False, "no radar in use this cycle")
     ages = [r["age_min"] if r.get("age_min") is not None else 0.0 for r in used]
     if min(ages) > MAX_RADAR_AGE_MIN:
-        return Assessment("no_data", f"freshest radar frame is {min(ages):.0f} min old")
+        return Assessment(False, f"freshest radar frame is {min(ages):.0f} min old")
 
-    d = haversine_km_arr(exp.lats[:, None], exp.lons[None, :], CHENNAI[0], CHENNAI[1])
-    zone = d <= ZONE_RADIUS_KM
-    if not zone.any():
-        return Assessment("no_data", "grid does not cover Chennai")
+    regions = regions if regions is not None else build_regions(exp.lats, exp.lons)
+    if not regions:
+        return Assessment(False, "grid does not cover Tamil Nadu")
 
     # Layers to read: the moved-forward ones (plus_N) when the export has
     # motion, else just the observed picture (can say "over", not "approaching").
@@ -171,121 +254,148 @@ def assess(exp: Export, now_utc: datetime) -> Assessment:
         idx = [(0, exp.layer_names.index("observed"))]
     idx.sort()
 
-    cover = (exp.grid[idx[0][1]][zone] != 255).mean()
-    if cover < MIN_ZONE_COVERAGE:
-        return Assessment("no_data", f"only {cover:.0%} of the Chennai zone is inside radar coverage")
-
-    first = None
-    max_dbz = 0.0
-    nodes_at_first = 0
-    for lead, i in idx:
-        v = exp.grid[i][zone]
-        strong = (v >= ALERT_DBZ) & (v < 255)
-        n = int(strong.sum())
-        if n >= MIN_ZONE_NODES:
-            if first is None:
-                first, nodes_at_first = lead, n
-            max_dbz = max(max_dbz, float(v[strong].max()))
-    if first is None:
-        return Assessment("none", "no strong echo in or heading for the zone",
-                          extra={"coverage": round(float(cover), 2)})
-
-    a = Assessment("over" if first == 0 else "approaching", "strong echo in zone",
-                   lead_min=first, max_dbz=max_dbz, zone_nodes=nodes_at_first,
-                   when_utc=exp.generated_utc + timedelta(minutes=first),
-                   extra={"coverage": round(float(cover), 2)})
-
-    # Where is it coming from / going: only a rain area whose own motion
-    # actually carries it into the zone at the time of the first hit. (The
-    # first version took the NEAREST strong area, which on 5 Oct was a big
-    # Tirupati storm that was not the thing heading for Chennai.)
-    best = None
-    for ar in doc.get("rain_areas", []):
-        sp, br = ar.get("speed_kmh"), ar.get("bearing_deg")
-        if not ar.get("has_strong_core") or ar.get("max_dbz", 0) < ALERT_DBZ or sp is None or br is None or sp < 5:
+    hits, uncovered = [], []
+    for reg in regions:
+        first_layer = exp.grid[idx[0][1]][reg.rs, reg.cs][reg.sub]
+        if (first_layer != 255).mean() < MIN_REGION_COVERAGE:
+            uncovered.append(reg.name)
             continue
-        # position of the area at the first-hit time, moved along its own motion
-        d_km = sp * first / 60.0
-        plat = ar["lat"] + d_km * math.cos(math.radians(br)) / 111.0
-        plon = ar["lon"] + d_km * math.sin(math.radians(br)) / (111.0 * math.cos(math.radians(ar["lat"])))
-        reach = ZONE_RADIUS_KM + min(math.sqrt(ar.get("area_km2", 0) / math.pi), 60.0)
-        d_then = float(haversine_km_arr(plat, plon, CHENNAI[0], CHENNAI[1]))
-        if d_then <= reach:
-            d_now = float(haversine_km_arr(ar["lat"], ar["lon"], CHENNAI[0], CHENNAI[1]))
-            if best is None or d_then < best[0]:
-                best = (d_then, d_now, ar)
-    if best is not None:
-        _, d_now, ar = best
-        if d_now > 10 and first > 0:
-            a.from_dir = compass(bearing_deg(CHENNAI[0], CHENNAI[1], ar["lat"], ar["lon"]))
-        a.speed_kmh, a.toward_dir = float(ar["speed_kmh"]), compass(float(ar["bearing_deg"]))
-    if a.speed_kmh is None:
-        m = doc.get("motion", {})
-        if m.get("available") and (m.get("overall_speed_kmh") or 0) >= 5:
-            a.speed_kmh, a.toward_dir = float(m["overall_speed_kmh"]), compass(float(m["overall_bearing_deg"]))
-    return a
-
-
-# --- the wording -----------------------------------------------------------------
-def build_text(a: Assessment, exp: Export) -> str:
-    sev, _ = severity_label(a.max_dbz)
-    asof = fmt_time(exp.generated_utc)
-    motion = ""
-    if a.speed_kmh is not None and a.toward_dir:
-        motion = f", moving {a.toward_dir} at ~{round(a.speed_kmh / 5) * 5:.0f} km/h"
-    if a.status == "over":
-        text = (f"Radar nowcast ({asof} IST): {sev} echoes (up to ~{a.max_dbz:.0f} dBZ) "
-                f"are over the Chennai area now{motion}. #ChennaiRains")
-    else:
-        src = f" from the {a.from_dir}" if a.from_dir else ""
-        text = (f"Radar nowcast ({asof} IST): {sev} echoes (up to ~{a.max_dbz:.0f} dBZ) "
-                f"approaching Chennai{src}{motion}. May reach the city around "
-                f"{fmt_time(a.when_utc)} IST. #ChennaiRains")
-    if len(text) > 280:
-        text = text.replace(motion, "") if motion else text
-    return text
+        first, nodes_first, max_dbz, cen = None, 0, 0.0, None
+        for lead, i in idx:
+            v = exp.grid[i][reg.rs, reg.cs]
+            strong = (v >= ALERT_DBZ) & (v < 255) & reg.sub
+            n = int(strong.sum())
+            if n >= reg.min_nodes:
+                if first is None:
+                    first, nodes_first = lead, n
+                    ys, xs = np.where(strong)
+                    cen = (float(exp.lats[reg.rs][ys].mean()), float(exp.lons[reg.cs][xs].mean()))
+                max_dbz = max(max_dbz, float(v[strong].max()))
+        if first is not None:
+            hits.append(Hit(reg.name, "over" if first == 0 else "approaching", first, max_dbz, nodes_first,
+                            exp.generated_utc + timedelta(minutes=first), cen[0], cen[1]))
+    return Assessment(True, "ok", hits, uncovered, len(regions))
 
 
 # --- episode / dedup state ---------------------------------------------------------
 def load_state(path: Path) -> dict:
     try:
-        return json.loads(Path(path).read_text())
+        st = json.loads(Path(path).read_text())
+        if isinstance(st.get("regions"), dict):
+            return st
     except Exception:
-        return {"episode_active": False, "last_post_utc": None, "last_hit_utc": None,
-                "last_status": None, "last_rank": 0}
+        pass
+    return {"regions": {}, "last_post_utc": None, "posts": {}}
 
 
 def _dt(s):
     return datetime.fromisoformat(s) if s else None
 
 
-def decide(a: Assessment, state: dict, now_utc: datetime) -> tuple[str, str]:
-    """("send"|"skip", reason). Mutates state only for bookkeeping that does
-    not depend on whether the post actually went out (hit time, episode end);
-    the caller records the post itself once it succeeded."""
-    if a.status == "no_data":
-        return "skip", a.reason
-    last_hit = _dt(state.get("last_hit_utc"))
-    if a.status == "none":
-        if state.get("episode_active") and last_hit and (now_utc - last_hit).total_seconds() / 60 >= CLEAR_AFTER_MIN:
-            state["episode_active"] = False
-            return "skip", "episode ended (zone quiet long enough)"
-        return "skip", a.reason
+def _mins(now, then):
+    return (now - then).total_seconds() / 60.0 if then else 1e9
 
-    state["last_hit_utc"] = now_utc.isoformat()
-    _, rank = severity_label(a.max_dbz)
-    if not state.get("episode_active"):
-        return "send", "new episode"
-    last_post = _dt(state.get("last_post_utc"))
-    gap = (now_utc - last_post).total_seconds() / 60 if last_post else 1e9
-    escalated = ((a.status == "over" and state.get("last_status") == "approaching")
-                 or rank > state.get("last_rank", 0))
-    if escalated and gap >= MIN_GAP_MIN:
-        return "send", "update: " + ("reached the zone" if a.status == "over" and state.get("last_status") == "approaching"
-                                    else "got stronger")
-    if escalated:
-        return "skip", f"would update but last post was {gap:.0f} min ago (< {MIN_GAP_MIN})"
-    return "skip", "already alerted for this episode"
+
+def decide(hits: list[Hit], state: dict, now_utc: datetime) -> tuple[str, str, set]:
+    """("send"|"skip", reason, names of regions that are new or upgraded).
+    Mutates state only for bookkeeping that does not depend on whether a post
+    went out (last hit time, episode end); the caller records the post itself
+    once it succeeded."""
+    regs = state.setdefault("regions", {})
+    hit_names = {h.name for h in hits}
+    for h in hits:
+        regs.setdefault(h.name, {"active": False, "last_post": None, "last_status": None, "last_rank": 0})
+        regs[h.name]["last_hit"] = now_utc.isoformat()
+    for name, st in regs.items():
+        if st.get("active") and name not in hit_names and _mins(now_utc, _dt(st.get("last_hit"))) >= CLEAR_AFTER_MIN:
+            st["active"] = False
+
+    if not hits:
+        return "skip", "no strong echo over or heading for any region", set()
+
+    changed = set()
+    new, upgraded = [], []
+    for h in hits:
+        st = regs[h.name]
+        if not st.get("active"):
+            new.append(h.name); changed.add(h.name); continue
+        _, rank = severity_label(h.max_dbz)
+        went_over = h.status == "over" and st.get("last_status") == "approaching"
+        if (went_over or rank > st.get("last_rank", 0)) and _mins(now_utc, _dt(st.get("last_post"))) >= MIN_GAP_MIN:
+            upgraded.append(h.name); changed.add(h.name)
+    if not changed:
+        return "skip", f"already alerted for the {len(hits)} active region(s)", set()
+    gap = _mins(now_utc, _dt(state.get("last_post_utc")))
+    if gap < GLOBAL_MIN_GAP_MIN:
+        return "skip", f"{len(changed)} change(s) waiting, last post was {gap:.0f} min ago (< {GLOBAL_MIN_GAP_MIN})", set()
+    today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
+    if state.get("posts", {}).get(today, 0) >= MAX_POSTS_PER_DAY:
+        return "skip", f"daily cap of {MAX_POSTS_PER_DAY} posts reached", set()
+    return "send", f"{len(new)} new, {len(upgraded)} upgraded", changed
+
+
+# --- the wording -----------------------------------------------------------------------
+def overall_motion(exp: Export, hits: list[Hit]) -> str:
+    """"moving NE ~25 km/h" from the strong rain areas near the listed regions,
+    only when they agree on direction; otherwise nothing (better silent than wrong)."""
+    vecs, wts = [], []
+    for ar in exp.doc.get("rain_areas", []):
+        sp, br = ar.get("speed_kmh"), ar.get("bearing_deg")
+        if not ar.get("has_strong_core") or ar.get("max_dbz", 0) < ALERT_DBZ or sp is None or br is None or sp < 5:
+            continue
+        if min(float(haversine_km_arr(ar["lat"], ar["lon"], h.lat, h.lon)) for h in hits) > 120:
+            continue
+        vecs.append((sp * math.sin(math.radians(br)), sp * math.cos(math.radians(br))))
+        wts.append(max(ar.get("area_km2", 1.0), 1.0))
+    if not vecs:
+        return ""
+    w = np.array(wts) / sum(wts)
+    u = float((np.array([v[0] for v in vecs]) * w).sum()); v = float((np.array([v[1] for v in vecs]) * w).sum())
+    mean_speed = float((np.hypot([x[0] for x in vecs], [x[1] for x in vecs]) * w).sum())
+    speed = math.hypot(u, v)
+    if speed < 8 or speed < 0.85 * mean_speed:     # slow, or the areas disagree on direction
+        return ""
+    return f"Moving {compass(math.degrees(math.atan2(u, v)) % 360)} ~{round(speed / 5) * 5:.0f} km/h."
+
+
+def order_hits(hits: list[Hit], changed: set) -> list[Hit]:
+    """New/upgraded first (they are why we are posting), then Chennai, 'over' before
+    'heading for', then strongest."""
+    return sorted(hits, key=lambda h: (h.name not in changed, h.name != "Chennai", h.status != "over",
+                                       -h.max_dbz, -h.nodes))
+
+
+def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
+    """Digest of at most MAX_NAMED_REGIONS names that fits 280 characters; returns the
+    text and the hits it names. The others are summarised as "+N more districts"."""
+    asof = fmt_time(exp.generated_utc)
+
+    def compose(sel: list[Hit], dropped: int, with_motion: bool) -> str:
+        sev, _ = severity_label(max(h.max_dbz for h in sel))
+        over = [h.name for h in sel if h.status == "over"]
+        groups: dict[int, list[str]] = {}
+        for h in sel:
+            if h.status == "approaching":
+                groups.setdefault(h.lead_min, []).append(h.name)
+        appr = "; ".join(f"{', '.join(names)} (~{fmt_time(exp.generated_utc + timedelta(minutes=lead))})"
+                         for lead, names in sorted(groups.items()))
+        if over and appr:
+            body = f"{sev} echoes over {', '.join(over)}; heading for {appr}."
+        elif over:
+            body = f"{sev} echoes over {', '.join(over)}."
+        else:
+            body = f"{sev} echoes heading for {appr}."
+        if dropped:
+            body += f" (+{dropped} more districts)"
+        motion = overall_motion(exp, sel) if with_motion else ""
+        return " ".join(x for x in (f"Radar nowcast ({asof} IST):", body, motion, HASHTAGS) if x)
+
+    for n in range(min(len(hits_ordered), MAX_NAMED_REGIONS), 0, -1):
+        for with_motion in (True, False):
+            text = compose(hits_ordered[:n], len(hits_ordered) - n, with_motion)
+            if len(text) <= 280:
+                return text, hits_ordered[:n]
+    return compose(hits_ordered[:1], len(hits_ordered) - 1, False)[:280], hits_ordered[:1]
 
 
 # --- the picture ---------------------------------------------------------------------
@@ -332,27 +442,33 @@ def _tile_mosaic(west, south, east, north, zoom, url_tpl):
     return np.asarray(canvas), ext, ok
 
 
-VIEW_MIN_KM, VIEW_MAX_KM = 45.0, 110.0   # half-width of the map around Chennai
+VIEW_MIN_KM, VIEW_MAX_KM = 45.0, 260.0   # half-width of the map
 
 
-def view_half_km(exp: Export, a: Assessment, names: dict) -> float:
-    """How far the map reaches from Chennai: just far enough to hold the storm
-    that is heading here (strong echo as observed now, within the distance it
-    could have travelled to reach the zone at the first-hit time), plus a
-    margin. Not the whole region: a far-off unrelated storm must not shrink
-    everything else."""
-    obs = exp.grid[names["observed"]]
-    d = haversine_km_arr(exp.lats[:, None], exp.lons[None, :], CHENNAI[0], CHENNAI[1])
-    travel = (a.speed_kmh * (a.lead_min or 0) / 60.0 if a.speed_kmh else 90.0) + ZONE_RADIUS_KM + 15.0
-    near = (obs >= ALERT_DBZ) & (obs < 255) & (d <= min(travel, VIEW_MAX_KM))
-    far = float(d[near].max()) if near.any() else 0.0
-    return float(np.clip(max(far * 1.15 + 8.0, ZONE_RADIUS_KM + 12.0), VIEW_MIN_KM, VIEW_MAX_KM))
+def view_box(exp: Export, hits: list[Hit], names: dict) -> tuple[float, float, float]:
+    """(centre lat, centre lon, half-width km): just enough to hold the listed
+    regions' echo and the storms heading for them, not all of Tamil Nadu."""
+    obs = exp.grid[names["plus_0"] if "plus_0" in names else names["observed"]]
+    ys, xs = np.where((obs >= ALERT_DBZ) & (obs < 255))
+    plat, plon = exp.lats[ys], exp.lons[xs]
+    keep = np.zeros(len(ys), dtype=bool)
+    for h in hits:
+        keep |= haversine_km_arr(plat, plon, h.lat, h.lon) <= 45.0 + 0.7 * h.lead_min
+    la = list(plat[keep]) + [h.lat for h in hits]
+    lo = list(plon[keep]) + [h.lon for h in hits]
+    if any(h.name == "Chennai" for h in hits):
+        la.append(CHENNAI[0]); lo.append(CHENNAI[1])
+    south, north, west, east = min(la), max(la), min(lo), max(lo)
+    clat, clon = (south + north) / 2, (west + east) / 2
+    span_km = max((north - south) * 111.0, (east - west) * 111.0 * math.cos(math.radians(clat)))
+    return clat, clon, float(np.clip(span_km / 2 * 1.25 + 15.0, VIEW_MIN_KM, VIEW_MAX_KM))
 
 
-def render_image(exp: Export, a: Assessment, path: Path, tile_url: str | None = None) -> Path:
+def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None = None,
+                 view_hits: list[Hit] | None = None) -> Path:
     """One large square map, readable on a phone: filled colours are the echo
-    now, the dashed outline is where strong echo is expected at the first-hit
-    time. The map reaches only from Chennai out to the storm."""
+    now, the dashed outline is where strong echo is expected at the horizon,
+    and each listed region is named where its echo is."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -360,26 +476,26 @@ def render_image(exp: Export, a: Assessment, path: Path, tile_url: str | None = 
     from matplotlib.colors import BoundaryNorm, ListedColormap
 
     names = {n: i for i, n in enumerate(exp.layer_names)}
-    half = view_half_km(exp, a, names)
+    clat, clon, half = view_box(exp, view_hits or hits, names)
     dlat = half / 111.0
-    dlon = half / (111.0 * math.cos(math.radians(CHENNAI[0])))
-    west, east, south, north = CHENNAI[1] - dlon, CHENNAI[1] + dlon, CHENNAI[0] - dlat, CHENNAI[0] + dlat
+    dlon = half / (111.0 * math.cos(math.radians(clat)))
+    west, east, south, north = clon - dlon, clon + dlon, clat - dlat, clat + dlat
 
     bg, bg_ext = None, None
     if tile_url:
         try:
-            zoom = 9 if half <= 70 else 8
+            zoom = 9 if half <= 55 else (8 if half <= 130 else 7)
             bg, bg_ext, _ = _tile_mosaic(west - 0.05, south - 0.05, east + 0.05, north + 0.05, zoom, tile_url)
         except Exception:
             bg = None
 
     cmap = ListedColormap(["#a8e6a1", "#5fcf6a", "#f4e04d", "#f7a936", "#ee6a2e", "#d62828", "#a4133c", "#7b2cbf"])
-    bounds = [20, 25, 30, 35, 40, 45, 50, 55, 70]
-    norm = BoundaryNorm(bounds, cmap.N)
+    norm = BoundaryNorm([20, 25, 30, 35, 40, 45, 50, 55, 70], cmap.N)
 
-    lead_then = a.lead_min if (a.lead_min and a.lead_min > 0) else 30
-    now_key, then_key = "observed", f"plus_{lead_then}"
-    now_layer = exp.grid[names["plus_0"] if "plus_0" in names else names[now_key]].astype(float)
+    approaching = [h.lead_min for h in hits if h.status == "approaching"]
+    lead_then = max(approaching) if approaching else 30
+    then_key = f"plus_{lead_then}"
+    now_layer = exp.grid[names["plus_0"] if "plus_0" in names else names["observed"]].astype(float)
     then_layer = exp.grid[names[then_key]].astype(float) if then_key in names else None
 
     halo = [pe.withStroke(linewidth=4, foreground="white")]
@@ -396,13 +512,21 @@ def render_image(exp: Export, a: Assessment, path: Path, tile_url: str | None = 
         if strong.any():
             ax.contour(X, Y, strong, levels=[0.5], colors="black", linewidths=3.0, linestyles="--", zorder=4)
 
-    t = np.linspace(0, 2 * math.pi, 120)
-    ax.plot(_mx(CHENNAI[1] + dlon * 0 + (ZONE_RADIUS_KM / (111.0 * math.cos(math.radians(CHENNAI[0])))) * np.cos(t)),
-            _my(CHENNAI[0] + (ZONE_RADIUS_KM / 111.0) * np.sin(t)),
-            color="#1a1a1a", lw=2.0, ls=":", zorder=3)
-    ax.plot([_mx(CHENNAI[1])], [_my(CHENNAI[0])], marker="o", ms=11, mfc="white", mec="black", mew=2.5, zorder=5)
-    ax.annotate("Chennai", (_mx(CHENNAI[1]), _my(CHENNAI[0])), xytext=(12, -22), textcoords="offset points",
-                fontsize=19, fontweight="bold", zorder=6, path_effects=halo)
+    if any(h.name == "Chennai" for h in hits):
+        t = np.linspace(0, 2 * math.pi, 120)
+        ax.plot(_mx(CHENNAI[1] + (CHENNAI_ZONE_KM / (111.0 * math.cos(math.radians(CHENNAI[0])))) * np.cos(t)),
+                _my(CHENNAI[0] + (CHENNAI_ZONE_KM / 111.0) * np.sin(t)), color="#1a1a1a", lw=2.0, ls=":", zorder=3)
+        ax.plot([_mx(CHENNAI[1])], [_my(CHENNAI[0])], marker="o", ms=9, mfc="white", mec="black", mew=2.2, zorder=5)
+    placed = []                      # label centres already drawn, as fractions of the map box
+    for h in hits[:8]:
+        fx = (_mx(h.lon) - _mx(west)) / (_mx(east) - _mx(west))
+        fy = (_my(h.lat) - _my(south)) / (_my(north) - _my(south))
+        if any(abs(fx - px) < 0.24 and abs(fy - py) < 0.09 for px, py in placed):
+            continue                 # would sit on top of another label; the text of the post still names it
+        placed.append((fx, fy))
+        label = h.name if h.status == "over" else f"{h.name}\n~{fmt_time(h.when_utc)}"
+        ax.annotate(label, (_mx(h.lon), _my(h.lat)), ha="center", va="center", fontsize=14 if half < 120 else 12,
+                    fontweight="bold", zorder=6, path_effects=halo)
     ax.set_xlim(_mx(west), _mx(east))
     ax.set_ylim(_my(south), _my(north))
     ax.set_aspect("equal")
@@ -410,11 +534,11 @@ def render_image(exp: Export, a: Assessment, path: Path, tile_url: str | None = 
     for sp in ax.spines.values():
         sp.set_linewidth(1.5)
 
-    sev, _ = severity_label(a.max_dbz)
-    now_t = fmt_time(exp.generated_utc)
-    then_t = fmt_time(exp.generated_utc + timedelta(minutes=lead_then))
-    fig.suptitle(f"Chennai radar nowcast: {sev} echoes", fontsize=20, fontweight="bold", y=0.985)
-    ax.set_title(f"Colours: now, {now_t} IST     Dashed outline: ~{then_t} IST", fontsize=13.5, pad=8)
+    sev, _ = severity_label(max(h.max_dbz for h in hits))
+    where = "Chennai" if all(h.name == "Chennai" for h in hits) else "Tamil Nadu"
+    fig.suptitle(f"{where} radar nowcast: {sev} echoes", fontsize=17.5, fontweight="bold", y=0.985)
+    ax.set_title(f"Colours: now, {fmt_time(exp.generated_utc)} IST     Dashed outline: ~"
+                 f"{fmt_time(exp.generated_utc + timedelta(minutes=lead_then))} IST", fontsize=13.5, pad=8)
     cb = fig.colorbar(mesh, ax=ax, orientation="horizontal", fraction=0.045, pad=0.025, ticks=[20, 30, 40, 50])
     cb.ax.tick_params(labelsize=13)
     cb.set_label("radar echo strength (dBZ)", fontsize=13)
@@ -476,49 +600,64 @@ def send_telegram(caption: str, image_path: Path | None) -> bool:
         return False
 
 
-# --- one-off link check ------------------------------------------------------------------
+# --- synthetic data (link check + tests) --------------------------------------------------
+def synthetic_export(now: datetime, storms: list[dict]) -> Export:
+    """A made-up Tamil-Nadu-wide export. storms: dicts with lat, lon, toward (deg), speed (km/h),
+    peak (dBZ) and radius (km, where echo falls to 20 dBZ)."""
+    step = 0.02
+    lats = 14.0 - np.arange(int(6.5 / step)) * step          # 14.0N .. 7.5N
+    lons = 76.0 + np.arange(int(5.0 / step)) * step          # 76E .. 81E
+    LAT, LON = np.meshgrid(lats, lons, indexing="ij")
+    names, leads, layers, areas = [], [], [], []
+    for lead in range(0, 100, 10):
+        g = np.zeros(LAT.shape, dtype=np.uint8)
+        for s in storms:
+            d = s["speed"] * lead / 60.0
+            cy = s["lat"] + d * math.cos(math.radians(s["toward"])) / 111.0
+            cx = s["lon"] + d * math.sin(math.radians(s["toward"])) / (111.0 * math.cos(math.radians(s["lat"])))
+            dist = np.hypot((LAT - cy) * 111.0, (LON - cx) * 111.0 * math.cos(math.radians(s["lat"])))
+            core = 20 + (s["peak"] - 20) * (1 - dist / s["radius"])
+            g = np.maximum(g, np.where(core >= 20, core, 0).astype(np.uint8))
+        names.append(f"plus_{lead}"); leads.append(lead); layers.append(g)
+    for s in storms:
+        areas.append({"lat": s["lat"], "lon": s["lon"], "area_km2": math.pi * s["radius"] ** 2, "max_dbz": s["peak"],
+                      "has_strong_core": True, "speed_kmh": s["speed"], "bearing_deg": s["toward"]})
+    names.insert(0, "observed"); leads.insert(0, 0); layers.insert(0, layers[0])
+    doc = {"generated_utc": now.isoformat(timespec="seconds"),
+           "radars": [{"product": "kkl_maxz", "radar": "karaikal", "used": True, "age_min": 10.0}],
+           "rain_areas": areas, "motion": {}}
+    return Export(doc, np.stack(layers), lats, lons, names, leads, now)
+
+
 def send_test_draft(tile_url: str | None = None, sender=send_telegram) -> bool:
-    """Sends a clearly-labelled draft built from a made-up storm 85 km SW of
-    Chennai, to check the Telegram link and the map background end to end
-    without waiting for real weather. Touches no state and no log."""
+    """Sends a clearly-labelled draft built from made-up storms (one over the
+    Cuddalore/Villupuram coast, one west of Tiruchirappalli), to check the
+    Telegram link and the map background end to end without waiting for real
+    weather. Touches no state and no log."""
     import tempfile
     now = datetime.now(timezone.utc)
-    step, lat_n, lon_w, nr, nc = 0.02, 15.0, 78.0, 200, 200
-    lats, lons = lat_n - np.arange(nr) * step, lon_w + np.arange(nc) * step
-    LAT, LON = np.meshgrid(lats, lons, indexing="ij")
-    coslat = math.cos(math.radians(13.0))
-    names, leads, layers = ["observed"], [0], [np.zeros((nr, nc), np.uint8)]
-    for lead in range(0, 100, 10):
-        km = 85.0 - 35.0 * lead / 60.0
-        cy = CHENNAI[0] - km * math.cos(math.radians(45)) / 111.0
-        cx = CHENNAI[1] - km * math.sin(math.radians(45)) / (111.0 * coslat)
-        dist = np.hypot((LAT - cy) * 111.0, (LON - cx) * 111.0 * coslat)
-        core = np.clip(47.0 - dist * 0.9, 0, 254)
-        names.append(f"plus_{lead}"); leads.append(lead)
-        layers.append(np.where(core >= 20, core, 0).astype(np.uint8))
-    layers[0] = layers[1]
-    doc = {"generated_utc": now.isoformat(timespec="seconds"), "radars": [], "rain_areas": [], "motion": {}}
-    exp = Export(doc, np.stack(layers), lats, lons, names, leads, now)
-    a = Assessment("approaching", "test", lead_min=60, max_dbz=47.0, zone_nodes=6,
-                   when_utc=now + timedelta(minutes=60), from_dir="SW", toward_dir="NE", speed_kmh=35.0)
-    text = build_text(a, exp)
+    exp = synthetic_export(now, [
+        dict(lat=11.75, lon=79.65, toward=20, speed=25, peak=55, radius=38),
+        dict(lat=10.8, lon=77.7, toward=80, speed=30, peak=50, radius=34)])
+    a = assess(exp, now)
+    if not a.hits:
+        print("[social] test draft: made-up storms produced no hits (boundary file missing?)")
+        return False
+    text, listed = build_text(order_hits(a.hits, {h.name for h in a.hits}), exp)
     png = None
     try:
-        png = render_image(exp, a, Path(tempfile.mkdtemp()) / "test_draft.png", tile_url)
+        png = render_image(exp, listed, Path(tempfile.mkdtemp()) / "test_draft.png", tile_url)
     except Exception as e:
         print(f"[social] test image failed: {e!r}")
-    caption = ("TEST DRAFT -- made-up storm, only checking the Telegram link and map background. "
-               "Nothing here is real weather.\n\n" + text)
-    ok = sender(caption, png)
+    ok = sender("TEST DRAFT -- made-up storms, only checking the Telegram link and map background. "
+                "Nothing here is real weather.\n\n" + text, png)
     print(f"[social] test draft {'sent' if ok else 'NOT sent'}")
     return bool(ok)
 
 
 # --- orchestration -----------------------------------------------------------------------
 def _append_log(path: Path, entry: dict) -> None:
-    lines = []
-    if path.exists():
-        lines = path.read_text().splitlines()
+    lines = path.read_text().splitlines() if path.exists() else []
     lines.append(json.dumps(entry, separators=(",", ":")))
     path.write_text("\n".join(lines[-DECISION_LOG_MAX_LINES:]) + "\n")
 
@@ -544,41 +683,57 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
 
     try:
         exp = load_export(json_path, grid_path)
-        load_err = "export has no grid this cycle"
+        err = "export has no grid this cycle"
     except Exception as e:
-        exp, load_err = None, f"could not read the export: {e!r}"
-    if exp is None:
-        a = Assessment("no_data", load_err)
-    else:
-        a = assess(exp, now_utc)
-    action, reason = decide(a, state, now_utc)
+        exp, err = None, f"could not read the export: {e!r}"
+    a = assess(exp, now_utc) if exp is not None else Assessment(False, err)
 
-    entry = {"t": now_utc.isoformat(timespec="seconds"), "status": a.status, "lead": a.lead_min,
-             "max_dbz": round(a.max_dbz, 1), "nodes": a.zone_nodes, "action": action, "reason": reason}
+    if not a.ok:
+        action, reason, changed = "skip", a.reason, set()
+    else:
+        action, reason, changed = decide(a.hits, state, now_utc)
+
+    entry = {"t": now_utc.isoformat(timespec="seconds"), "action": action, "reason": reason,
+             "over": [h.name for h in a.hits if h.status == "over"],
+             "heading": {h.name: h.lead_min for h in a.hits if h.status == "approaching"},
+             "max_dbz": round(max((h.max_dbz for h in a.hits), default=0.0), 1)}
+    if a.uncovered:
+        entry["no_coverage"] = len(a.uncovered)
 
     if action == "send":
-        text = build_text(a, exp)
+        text, listed = build_text(order_hits(a.hits, changed), exp)
         stamp = now_utc.astimezone(IST).strftime("%Y%m%d_%H%M%S")
         drafts = state_dir / "drafts"
         drafts.mkdir(exist_ok=True)
         png = None
         try:
-            png = render_image(exp, a, drafts / f"{stamp}.png", tile_url)
+            png = render_image(exp, listed, drafts / f"{stamp}.png", tile_url, view_hits=a.hits)
         except Exception as e:
             print(f"[social] image failed, sending text only: {e!r}")
-        caption = (f"SHADOW DRAFT (not posted anywhere public)\n\n{text}\n\n"
-                   f"Why: {reason}; status={a.status}, first strong echo in zone at +{a.lead_min} min, "
-                   f"{a.zone_nodes} nodes >= {ALERT_DBZ:.0f} dBZ within {ZONE_RADIUS_KM:.0f} km.")
+        why = "\n".join(f"- {h.name}: {'over now' if h.status == 'over' else f'+{h.lead_min} min'}, "
+                        f"{h.max_dbz:.0f} dBZ, {h.nodes} strong nodes" for h in listed[:10])
+        if len(a.hits) > len(listed):
+            why += f"\n- ...and {len(a.hits) - len(listed)} more: " + ", ".join(
+                h.name for h in order_hits(a.hits, changed) if h not in listed)
+        caption = (f"SHADOW DRAFT (not posted anywhere public)\n\n{text}\n\nWhy ({reason}):\n{why}")
         (drafts / f"{stamp}.txt").write_text(text + "\n")
         _prune_drafts(drafts)
         print(f"[social] DRAFT: {text}")
         sent = sender(caption, png)
         entry["sent"] = bool(sent)
         entry["text"] = text
+        entry["listed"] = [h.name for h in listed]
         if sent:
-            _, rank = severity_label(a.max_dbz)
-            state.update(episode_active=True, last_post_utc=now_utc.isoformat(),
-                         last_status=a.status, last_rank=rank)
+            regs = state.setdefault("regions", {})
+            for h in a.hits:       # everything summarised in this post (named or "+N more") counts as announced
+                _, rank = severity_label(h.max_dbz)
+                regs[h.name].update(active=True, last_post=now_utc.isoformat(), last_status=h.status, last_rank=rank)
+            state["last_post_utc"] = now_utc.isoformat()
+            today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
+            posts = state.setdefault("posts", {})
+            posts[today] = posts.get(today, 0) + 1
+            for k in sorted(posts)[:-7]:
+                del posts[k]
     else:
         print(f"[social] no post: {reason}")
 
