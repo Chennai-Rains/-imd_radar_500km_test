@@ -389,11 +389,15 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
         motion = overall_motion(exp, sel) if with_motion else ""
         return " ".join(x for x in (f"COMK Automated Radar Nowcast ({asof} IST):", body, motion, HASHTAGS) if x)
 
+    def chrono(sel):      # on show: impacting now first, then by when the storm arrives
+        return sorted(sel, key=lambda h: (h.status != "over", h.lead_min))
+
     for n in range(min(len(hits_ordered), MAX_NAMED_REGIONS), 0, -1):
         for with_motion in (False,):
-            text = compose(hits_ordered[:n], len(hits_ordered) - n, with_motion)
+            sel = chrono(hits_ordered[:n])
+            text = compose(sel, len(hits_ordered) - n, with_motion)
             if len(text) <= 280:
-                return text, hits_ordered[:n]
+                return text, sel
     return compose(hits_ordered[:1], len(hits_ordered) - 1, False)[:280], hits_ordered[:1]
 
 
@@ -404,7 +408,8 @@ def build_details(listed: list[Hit], all_ordered: list[Hit]) -> str:
     soon = sorted((h for h in listed if h.status == "approaching"), key=lambda h: h.lead_min)
     lines = [f"- {h.name}: Now impacting" for h in now_]
     lines += [f"- {h.name}: In roughly {h.lead_min} minutes" for h in soon]
-    rest = [h.name for h in all_ordered if h not in listed]
+    rest = [h.name for h in sorted((h for h in all_ordered if h not in listed),
+                                   key=lambda h: (h.status != "over", h.lead_min))]
     if rest:
         lines.append(f"- ...and {len(rest)} more: " + ", ".join(rest))
     return "\n".join(lines)
