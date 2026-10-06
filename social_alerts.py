@@ -517,6 +517,22 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
         ax.plot(_mx(CHENNAI[1] + (CHENNAI_ZONE_KM / (111.0 * math.cos(math.radians(CHENNAI[0])))) * np.cos(t)),
                 _my(CHENNAI[0] + (CHENNAI_ZONE_KM / 111.0) * np.sin(t)), color="#1a1a1a", lw=2.0, ls=":", zorder=3)
         ax.plot([_mx(CHENNAI[1])], [_my(CHENNAI[0])], marker="o", ms=9, mfc="white", mec="black", mew=2.2, zorder=5)
+    # Direction arrows, same look as the radar page: a dark triangle with a white edge,
+    # placed a little ahead of each moving strong rain area, pointing along its bearing.
+    from matplotlib.markers import MarkerStyle
+    tri = np.array([[0, 1.0], [-0.73, -0.73], [0, -0.27], [0.73, -0.73], [0, 1.0]])
+    n_arrows = 0
+    for ar in exp.doc.get("rain_areas", []):
+        sp, br = ar.get("speed_kmh"), ar.get("bearing_deg")
+        if sp is None or br is None or sp < 5 or ar.get("max_dbz", 0) < 30:
+            continue
+        a_lat = ar["lat"] + (sp * 0.4 * math.cos(math.radians(br))) / 111.0
+        a_lon = ar["lon"] + (sp * 0.4 * math.sin(math.radians(br))) / (111.0 * math.cos(math.radians(ar["lat"])))
+        if not (west < a_lon < east and south < a_lat < north):
+            continue
+        ax.plot([_mx(a_lon)], [_my(a_lat)], marker=MarkerStyle(tri).rotated(deg=-br), ms=19,
+                mfc="#222222", mec="white", mew=1.6, linestyle="none", zorder=7)
+        n_arrows += 1
     placed = []                      # label centres already drawn, as fractions of the map box
     for h in hits[:8]:
         fx = (_mx(h.lon) - _mx(west)) / (_mx(east) - _mx(west))
@@ -525,7 +541,7 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
             continue                 # would sit on top of another label; the text of the post still names it
         placed.append((fx, fy))
         label = h.name if h.status == "over" else f"{h.name}\n~{fmt_time(h.when_utc)}"
-        ax.annotate(label, (_mx(h.lon), _my(h.lat)), ha="center", va="center", fontsize=14 if half < 120 else 12,
+        ax.annotate(label, (_mx(h.lon), _my(h.lat)), xytext=(0, -22), textcoords="offset points", ha="center", va="top", fontsize=14 if half < 120 else 12,
                     fontweight="bold", zorder=6, path_effects=halo)
     ax.set_xlim(_mx(west), _mx(east))
     ax.set_ylim(_my(south), _my(north))
@@ -537,8 +553,9 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
     sev, _ = severity_label(max(h.max_dbz for h in hits))
     where = "Chennai" if all(h.name == "Chennai" for h in hits) else "Tamil Nadu"
     fig.suptitle(f"{where} radar nowcast: {sev} echoes", fontsize=17.5, fontweight="bold", y=0.985)
-    ax.set_title(f"Colours: now, {fmt_time(exp.generated_utc)} IST     Dashed outline: ~"
-                 f"{fmt_time(exp.generated_utc + timedelta(minutes=lead_then))} IST", fontsize=13.5, pad=8)
+    ax.set_title(f"Colours: now {fmt_time(exp.generated_utc)}   Dashed: ~"
+                 f"{fmt_time(exp.generated_utc + timedelta(minutes=lead_then))}"
+                 + ("   Arrows: motion" if n_arrows else ""), fontsize=12.5, pad=8)
     cb = fig.colorbar(mesh, ax=ax, orientation="horizontal", fraction=0.045, pad=0.025, ticks=[20, 30, 40, 50])
     cb.ax.tick_params(labelsize=13)
     cb.set_label("radar echo strength (dBZ)", fontsize=13)
