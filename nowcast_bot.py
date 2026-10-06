@@ -3123,6 +3123,29 @@ def compute_optical_flow(prev_dbz: np.ndarray, curr_dbz: np.ndarray,
 
     prev_gray = to_gray(prev_dbz)
     curr_gray = to_gray(curr_dbz)
+
+    # Very fine-resolution products (NIOT MAXZ is ~10.6 px per km) move far
+    # more PIXELS between two frames than Farneback's window can follow: a
+    # 30 km/h storm shifts ~80 px in 15 min, and the window (25) is only
+    # reliable to about 15-20 px, so measured speeds came out near zero and
+    # directions were close to random. Measure on a copy shrunk to about
+    # 1 px/km instead (a 30 km/h storm is then ~8 px) and scale the vectors
+    # back to full-resolution pixels. Checked with known synthetic shifts:
+    # 10-45 km/h come out within ~2% in the right direction (unchanged
+    # products, at or below ~2 px/km, take the original path below).
+    px_per_km = PRODUCTS[product]["km_per_px"]     # despite its name: pixels per km
+    shrink = int(px_per_km // 1.0) if px_per_km >= 2.0 else 1
+    if shrink >= 2:
+        h, w = prev_gray.shape
+        small = (max(w // shrink, 1), max(h // shrink, 1))
+        flow_small = cv2.calcOpticalFlowFarneback(
+            cv2.resize(prev_gray, small, interpolation=cv2.INTER_AREA),
+            cv2.resize(curr_gray, small, interpolation=cv2.INTER_AREA), None,
+            pyr_scale=0.5, levels=4, winsize=25, iterations=3,
+            poly_n=5, poly_sigma=1.2, flags=0,
+        )
+        return cv2.resize(flow_small, (w, h), interpolation=cv2.INTER_LINEAR) * float(shrink)
+
     flow = cv2.calcOpticalFlowFarneback(
         prev_gray, curr_gray, None,
         pyr_scale=0.5, levels=3, winsize=25, iterations=3,
@@ -3159,7 +3182,7 @@ def sample_cell_velocity_from_flow(flow: np.ndarray, cell: Cell, dt_minutes: flo
     dx = float(np.median(patch[..., 0]))
     dy = float(np.median(patch[..., 1]))
 
-    km_per_px = PRODUCTS[product]["km_per_px"]
+    km_per_px = PRODUCTS[product]["km_per_px"]   # NB: really PIXELS per km (pixel_to_latlon divides by it too), so km = px / this
     # Same sign convention as pixel_to_latlon: increasing py = moving south,
     # increasing px = moving east.
     km_east = dx / km_per_px
