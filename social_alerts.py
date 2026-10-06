@@ -442,7 +442,7 @@ def _tile_mosaic(west, south, east, north, zoom, url_tpl):
     return np.asarray(canvas), ext, ok
 
 
-VIEW_MIN_KM, VIEW_MAX_KM = 45.0, 260.0   # half-width of the map
+VIEW_MIN_KM, VIEW_MAX_KM = 60.0, 260.0   # half-width of the map
 
 
 def view_box(exp: Export, hits: list[Hit], names: dict) -> tuple[float, float, float]:
@@ -462,6 +462,42 @@ def view_box(exp: Export, hits: list[Hit], names: dict) -> tuple[float, float, f
     clat, clon = (south + north) / 2, (west + east) / 2
     span_km = max((north - south) * 111.0, (east - west) * 111.0 * math.cos(math.radians(clat)))
     return clat, clon, float(np.clip(span_km / 2 * 1.25 + 15.0, VIEW_MIN_KM, VIEW_MAX_KM))
+
+
+MAX_IMAGES = 4
+IMAGE_MERGE_KM = 90.0     # regions closer than this share one picture
+
+
+def split_views(hits: list[Hit], max_views: int = MAX_IMAGES) -> list[list[Hit]]:
+    """Groups the regions into at most max_views spatial clusters, one picture
+    each, so a statewide system is shown as a few zoomed-in maps instead of one
+    crowded one. Regions within IMAGE_MERGE_KM of each other stay together."""
+    if len(hits) <= 1:
+        return [list(hits)] if hits else []
+    from scipy.cluster.hierarchy import fcluster, linkage
+    km_lat = 111.0
+    pts = np.array([[h.lat * km_lat, h.lon * km_lat * math.cos(math.radians(h.lat))] for h in hits])
+    Z = linkage(pts, method="complete")
+    lab = fcluster(Z, t=IMAGE_MERGE_KM, criterion="distance")
+    if lab.max() > max_views:
+        lab = fcluster(Z, t=max_views, criterion="maxclust")
+    groups: dict[int, list[Hit]] = {}
+    for h, l in zip(hits, lab):
+        groups.setdefault(int(l), []).append(h)
+    # strongest group first, so the first picture (the one with the caption) matters most
+    return sorted(groups.values(), key=lambda g: -max(h.max_dbz for h in g))
+
+
+def render_images(exp: Export, hits: list[Hit], base_path: Path, tile_url: str | None = None) -> list[Path]:
+    """One zoomed map per spatial group of regions (see split_views). Each shows
+    every echo and arrow inside its own view; names only the regions in it."""
+    base_path = Path(base_path)
+    views = split_views(hits)
+    out = []
+    for i, grp in enumerate(views, 1):
+        path = base_path.with_name(f"{base_path.stem}_{i}{base_path.suffix}") if len(views) > 1 else base_path
+        out.append(render_image(exp, hits, path, tile_url, view_hits=grp))
+    return out
 
 
 def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None = None,
@@ -541,9 +577,11 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
                 mfc="#333333", mec="white", mew=1.4, linestyle="none", zorder=7)
         n_arrows += 1
     placed = []                      # label centres already drawn, as fractions of the map box
-    for h in hits[:8]:
+    for h in hits[:16]:
         fx = (_mx(h.lon) - _mx(west)) / (_mx(east) - _mx(west))
         fy = (_my(h.lat) - _my(south)) / (_my(north) - _my(south))
+        if not (0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0):
+            continue                 # outside this panel's view
         if any(abs(fx - px) < 0.24 and abs(fy - py) < 0.09 for px, py in placed):
             continue                 # would sit on top of another label; the text of the post still names it
         placed.append((fx, fy))
@@ -557,9 +595,8 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
     for sp in ax.spines.values():
         sp.set_linewidth(1.5)
 
-    sev, _ = severity_label(max(h.max_dbz for h in hits))
     where = "Chennai" if all(h.name == "Chennai" for h in hits) else "Tamil Nadu"
-    fig.suptitle(f"{where} radar nowcast: {sev} echoes", fontsize=17.5, fontweight="bold", y=0.985)
+    fig.suptitle(f"{where} radar nowcast: Thunderstorms", fontsize=17.5, fontweight="bold", y=0.985)
     ax.set_title(f"Colours: now {fmt_time(exp.generated_utc)}   Dashed: ~"
                  f"{fmt_time(exp.generated_utc + timedelta(minutes=lead_then))}"
                  + ("   Arrows: motion" if n_arrows else ""), fontsize=12.5, pad=8)
@@ -604,7 +641,21 @@ def send_telegram(caption: str, image_path: Path | None) -> bool:
         return False
     caption = caption[:1020]
     try:
-        if image_path and Path(image_path).exists():
+        images = [Path(x) for x in (image_path if isinstance(image_path, (list, tuple)) else [image_path]) if x]
+        images = [x for x in images if x.exists()]
+        if len(images) > 1:
+            handles = [open(x, "rb") for x in images[:10]]
+            try:
+                media = [{"type": "photo", "media": f"attach://p{i}", **({"caption": caption} if i == 0 else {})}
+                         for i in range(len(handles))]
+                r = requests.post(f"https://api.telegram.org/bot{token}/sendMediaGroup",
+                                  data={"chat_id": chat, "media": json.dumps(media)},
+                                  files={f"p{i}": fh for i, fh in enumerate(handles)}, timeout=60)
+            finally:
+                for fh in handles:
+                    fh.close()
+        elif images:
+            image_path = images[0]
             with open(image_path, "rb") as fh:
                 r = requests.post(f"https://api.telegram.org/bot{token}/sendPhoto",
                                   data={"chat_id": chat, "caption": caption},
@@ -672,7 +723,7 @@ def send_test_draft(tile_url: str | None = None, sender=send_telegram) -> bool:
     text, listed = build_text(order_hits(a.hits, {h.name for h in a.hits}), exp)
     png = None
     try:
-        png = render_image(exp, listed, Path(tempfile.mkdtemp()) / "test_draft.png", tile_url)
+        png = render_images(exp, order_hits(a.hits, {h.name for h in a.hits}), Path(tempfile.mkdtemp()) / "test_draft.png", tile_url)
     except Exception as e:
         print(f"[social] test image failed: {e!r}")
     ok = sender("TEST DRAFT -- made-up storms, only checking the Telegram link and map background. "
@@ -691,9 +742,10 @@ def _append_log(path: Path, entry: dict) -> None:
 def _prune_drafts(folder: Path) -> None:
     files = sorted(folder.glob("*.txt"))
     for old in files[:-DRAFTS_KEEP]:
-        for ext in (".txt", ".png"):
+        victims = [old, *old.parent.glob(f"{old.stem}*.png")]
+        for f in victims:
             try:
-                old.with_suffix(ext).unlink()
+                f.unlink()
             except OSError:
                 pass
 
@@ -733,7 +785,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         drafts.mkdir(exist_ok=True)
         png = None
         try:
-            png = render_image(exp, listed, drafts / f"{stamp}.png", tile_url, view_hits=a.hits)
+            png = render_images(exp, order_hits(a.hits, changed), drafts / f"{stamp}.png", tile_url)
         except Exception as e:
             print(f"[social] image failed, sending text only: {e!r}")
         why = "\n".join(f"- {h.name}: {'over now' if h.status == 'over' else f'+{h.lead_min} min'}, "
