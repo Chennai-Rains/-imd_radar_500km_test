@@ -482,6 +482,8 @@ def view_box(exp: Export, hits: list[Hit], names: dict) -> tuple[float, float, f
 
 
 MAX_IMAGES = 4
+ARROW_MIN_KMH = 8.0            # slower storms get no arrow: direction is noise
+ARROW_MAX_DISAGREE_DEG = 60.0  # arrow must roughly agree with the area motion the outline is based on
 IMAGE_MERGE_KM = 90.0     # regions closer than this share one picture
 
 
@@ -579,8 +581,18 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
     # at the same spot: 16.5 min (0.55 x the 30 min lead) ahead of the cell along its bearing.
     for c in sorted(exp.doc.get("cells", []), key=lambda c: -c.get("area_km2", 0)):
         sp, br = c.get("speed_kmh"), c.get("bearing_deg")
-        if not c.get("motion_reliable") or sp is None or br is None:
-            continue
+        if not c.get("motion_reliable") or sp is None or br is None or sp < ARROW_MIN_KMH:
+            continue                 # too slow for a direction to mean anything
+        # The dashed outline comes from the area-wide motion; an arrow that points a very
+        # different way (or where the area itself is barely moving) would contradict it.
+        near = [(float(haversine_km_arr(ar["lat"], ar["lon"], c["lat"], c["lon"])), ar)
+                for ar in exp.doc.get("rain_areas", []) if ar.get("speed_kmh") is not None]
+        near = [x for x in near if x[0] <= 60.0]
+        if near:
+            ar = min(near, key=lambda x: x[0])[1]
+            diff = abs((br - ar["bearing_deg"] + 180.0) % 360.0 - 180.0)
+            if ar["speed_kmh"] < 5.0 or diff > ARROW_MAX_DISAGREE_DEG:
+                continue
         a_lat = c["lat"] + (sp * 0.275 * math.cos(math.radians(br))) / 111.0
         a_lon = c["lon"] + (sp * 0.275 * math.sin(math.radians(br))) / (111.0 * math.cos(math.radians(c["lat"])))
         if not (west < a_lon < east and south < a_lat < north):
