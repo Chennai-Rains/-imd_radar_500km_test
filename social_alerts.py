@@ -371,7 +371,6 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
     asof = fmt_time(exp.generated_utc)
 
     def compose(sel: list[Hit], dropped: int, with_motion: bool) -> str:
-        sev, _ = severity_label(max(h.max_dbz for h in sel))
         over = [h.name for h in sel if h.status == "over"]
         groups: dict[int, list[str]] = {}
         for h in sel:
@@ -380,15 +379,15 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
         appr = "; ".join(f"{', '.join(names)} (~{fmt_time(exp.generated_utc + timedelta(minutes=lead))})"
                          for lead, names in sorted(groups.items()))
         if over and appr:
-            body = f"{sev} echoes over {', '.join(over)}; heading for {appr}."
+            body = f"Thunderstorms over {', '.join(over)}; likely movement towards {appr}."
         elif over:
-            body = f"{sev} echoes over {', '.join(over)}."
+            body = f"Thunderstorms over {', '.join(over)}."
         else:
-            body = f"{sev} echoes heading for {appr}."
+            body = f"Thunderstorms likely moving towards {appr}."
         if dropped:
             body += f" (+{dropped} more districts)"
         motion = overall_motion(exp, sel) if with_motion else ""
-        return " ".join(x for x in (f"Radar nowcast ({asof} IST):", body, motion, HASHTAGS) if x)
+        return " ".join(x for x in (f"COMK Automated Radar Nowcast ({asof} IST):", body, motion, HASHTAGS) if x)
 
     for n in range(min(len(hits_ordered), MAX_NAMED_REGIONS), 0, -1):
         for with_motion in (False,):
@@ -396,6 +395,19 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
             if len(text) <= 280:
                 return text, hits_ordered[:n]
     return compose(hits_ordered[:1], len(hits_ordered) - 1, False)[:280], hits_ordered[:1]
+
+
+def build_details(listed: list[Hit], all_ordered: list[Hit]) -> str:
+    """Plain-language list under the headline: where it is now, where it is heading and
+    in roughly how many minutes. No dBZ or node counts (those stay in the decision log)."""
+    now_ = [h for h in listed if h.status == "over"]
+    soon = sorted((h for h in listed if h.status == "approaching"), key=lambda h: h.lead_min)
+    lines = [f"- {h.name}: Now impacting" for h in now_]
+    lines += [f"- {h.name}: In roughly {h.lead_min} minutes" for h in soon]
+    rest = [h.name for h in all_ordered if h not in listed]
+    if rest:
+        lines.append(f"- ...and {len(rest)} more: " + ", ".join(rest))
+    return "\n".join(lines)
 
 
 # --- the picture ---------------------------------------------------------------------
@@ -727,7 +739,7 @@ def send_test_draft(tile_url: str | None = None, sender=send_telegram) -> bool:
     except Exception as e:
         print(f"[social] test image failed: {e!r}")
     ok = sender("TEST DRAFT -- made-up storms, only checking the Telegram link and map background. "
-                "Nothing here is real weather.\n\n" + text, png)
+                "Nothing here is real weather.\n\n" + text + "\n\n" + build_details(listed, order_hits(a.hits, {h.name for h in a.hits})), png)
     print(f"[social] test draft {'sent' if ok else 'NOT sent'}")
     return bool(ok)
 
@@ -788,12 +800,9 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
             png = render_images(exp, order_hits(a.hits, changed), drafts / f"{stamp}.png", tile_url)
         except Exception as e:
             print(f"[social] image failed, sending text only: {e!r}")
-        why = "\n".join(f"- {h.name}: {'over now' if h.status == 'over' else f'+{h.lead_min} min'}, "
-                        f"{h.max_dbz:.0f} dBZ, {h.nodes} strong nodes" for h in listed[:10])
-        if len(a.hits) > len(listed):
-            why += f"\n- ...and {len(a.hits) - len(listed)} more: " + ", ".join(
-                h.name for h in order_hits(a.hits, changed) if h not in listed)
-        caption = (f"SHADOW DRAFT (not posted anywhere public)\n\n{text}\n\nWhy ({reason}):\n{why}")
+        ordered = order_hits(a.hits, changed)
+        details = build_details(listed, ordered)
+        caption = f"{text}\n\n{details}\n\n(Shadow draft, not posted anywhere public. Why: {reason})"
         (drafts / f"{stamp}.txt").write_text(text + "\n")
         _prune_drafts(drafts)
         print(f"[social] DRAFT: {text}")
