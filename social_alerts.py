@@ -391,7 +391,7 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
         return " ".join(x for x in (f"Radar nowcast ({asof} IST):", body, motion, HASHTAGS) if x)
 
     for n in range(min(len(hits_ordered), MAX_NAMED_REGIONS), 0, -1):
-        for with_motion in (True, False):
+        for with_motion in (False,):
             text = compose(hits_ordered[:n], len(hits_ordered) - n, with_motion)
             if len(text) <= 280:
                 return text, hits_ordered[:n]
@@ -510,7 +510,7 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
     if then_layer is not None:
         strong = ((then_layer >= ALERT_DBZ) & (then_layer < 255)).astype(float)
         if strong.any():
-            ax.contour(X, Y, strong, levels=[0.5], colors="black", linewidths=3.0, linestyles="--", zorder=4)
+            ax.contour(X, Y, strong, levels=[0.5], colors="black", linewidths=1.6, linestyles="--", zorder=4)
 
     if any(h.name == "Chennai" for h in hits):
         t = np.linspace(0, 2 * math.pi, 120)
