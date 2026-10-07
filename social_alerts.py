@@ -6,6 +6,7 @@ Reads the bot data export the pipeline already writes every cycle
 whether strong echo is over or about to reach it. Regions are Chennai (a 40 km
 zone, as before) plus every Tamil Nadu district (outlines in
 assets/tn_districts.geojson, used only to say which district an echo lies in).
+When assets/tn_places.json exists, regions are OSM towns and cities instead (a disc around each).
 
 Each cycle produces AT MOST ONE post: a digest of every region currently
 affected, e.g. "strong echoes over Villupuram, Cuddalore; heading for
@@ -49,6 +50,7 @@ import requests
 IST = timezone(timedelta(hours=5, minutes=30))
 HERE = Path(__file__).resolve().parent
 TN_GEOJSON = HERE / "assets" / "tn_districts.geojson"
+TN_PLACES = HERE / "assets" / "tn_places.json"   # towns and cities from OpenStreetMap (tools/fetch_osm_places.py)
 
 # --- where / how strong ------------------------------------------------------
 CHENNAI = (13.0827, 80.2707)
@@ -60,6 +62,11 @@ MAX_LEAD_MIN = 90          # the export carries layers out to +90 min
 # Names as the audience writes them (the boundary file uses other spellings).
 RENAME = {"Thiruvallur": "Tiruvallur", "Viluppuram": "Villupuram", "Thoothukkudi": "Thoothukudi",
           "Tirupathur": "Tirupattur", "Thiruvarur": "Tiruvarur"}
+PLACE_RENAME = {"Kallakuruchi": "Kallakurichi", "Kanchipuram": "Kancheepuram", "Viluppuram": "Villupuram",
+                "Thiruvarur": "Tiruvarur", "Giingee": "Gingee", "Tiruppattur": "Tirupattur",
+                "Tiruppur": "Tirupur", "Udhagamandalam": "Ooty (Udhagamandalam)"}
+PLACE_RADIUS_KM = {"city": 12.0, "town": 8.0}   # a place is "hit" when strong echo covers enough of this disc
+PLACE_CHENNAI_ZONE_KM = 20.0   # in place mode "Chennai" is the city only, not the whole 40 km zone
 SKIP_DISTRICTS = {"Chennai"}   # covered by the Chennai zone, which is the same ground
 
 # --- trust: when NOT to say anything -----------------------------------------
@@ -179,7 +186,40 @@ def _polygon_mask(polys, LAT, LON):
     return out.reshape(LAT.shape)
 
 
+def build_place_regions(lats, lons, places_path: Path = TN_PLACES) -> list[Region]:
+    """Chennai (20 km disc) first, then one disc per OSM town/city that has nodes on the grid."""
+    regions = []
+    places = json.loads(Path(places_path).read_text())
+    spec = [("Chennai", CHENNAI[0], CHENNAI[1], PLACE_CHENNAI_ZONE_KM)]
+    for p in places:
+        if p["name"] == "Chennai" or haversine_km(p["lat"], p["lon"], CHENNAI[0], CHENNAI[1]) < PLACE_CHENNAI_ZONE_KM:
+            continue
+        spec.append((PLACE_RENAME.get(p["name"], p["name"]), p["lat"], p["lon"], PLACE_RADIUS_KM.get(p["kind"], 8.0)))
+    for name, lat, lon, rad in spec:
+        dlat = rad / 111.0
+        dlon = rad / (111.0 * math.cos(math.radians(lat)))
+        rs, cs = _box(lats, lons, lat - dlat, lat + dlat, lon - dlon, lon + dlon)
+        if rs.stop <= rs.start or cs.stop <= cs.start:
+            continue
+        LAT, LON = np.meshgrid(lats[rs], lons[cs], indexing="ij")
+        sub = haversine_km_arr(LAT, LON, lat, lon) <= rad
+        if sub.any():
+            regions.append(Region(name, rs, cs, sub, int(sub.sum())))
+    return regions
+
+
+def haversine_km(lat1, lon1, lat2, lon2) -> float:
+    return float(haversine_km_arr(np.array(lat1), np.array(lon1), lat2, lon2))
+
+
 def build_regions(lats, lons, geojson_path: Path = TN_GEOJSON) -> list[Region]:
+    """Places (OSM towns and cities) when assets/tn_places.json exists, else districts."""
+    if TN_PLACES.exists() and geojson_path == TN_GEOJSON:
+        return build_place_regions(lats, lons)
+    return build_district_regions(lats, lons, geojson_path)
+
+
+def build_district_regions(lats, lons, geojson_path: Path = TN_GEOJSON) -> list[Region]:
     """Chennai zone first, then the districts that have at least one node on the grid."""
     regions = []
     dlat = CHENNAI_ZONE_KM / 111.0
@@ -367,7 +407,7 @@ def order_hits(hits: list[Hit], changed: set) -> list[Hit]:
 
 def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
     """Digest of at most MAX_NAMED_REGIONS names that fits 280 characters; returns the
-    text and the hits it names. The others are summarised as "+N more districts"."""
+    text and the hits it names. The others are summarised as "+N more places"."""
     asof = fmt_time(exp.generated_utc)
 
     def compose(sel: list[Hit], dropped: int, with_motion: bool) -> str:
@@ -385,7 +425,7 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
         else:
             body = f"Thunderstorms likely moving towards {appr}."
         if dropped:
-            body += f" (+{dropped} more districts)"
+            body += f" (+{dropped} more places)"
         motion = overall_motion(exp, sel) if with_motion else ""
         return " ".join(x for x in (f"COMK Automated Radar Nowcast ({asof} IST):", body, motion, HASHTAGS) if x)
 
@@ -411,7 +451,9 @@ def build_details(listed: list[Hit], all_ordered: list[Hit]) -> str:
     rest = [h.name for h in sorted((h for h in all_ordered if h not in listed),
                                    key=lambda h: (h.status != "over", h.lead_min))]
     if rest:
-        lines.append(f"- ...and {len(rest)} more: " + ", ".join(rest))
+        shown = rest[:10]   # keep the caption inside Telegram's length limit on big days
+        more = f" (+{len(rest) - len(shown)} others)" if len(rest) > len(shown) else ""
+        lines.append(f"- ...and {len(rest)} more: " + ", ".join(shown) + more)
     return "\n".join(lines)
 
 
