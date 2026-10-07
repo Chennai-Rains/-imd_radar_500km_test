@@ -19,7 +19,7 @@ checked against real storm days.
 How a widespread day stays readable: a region is announced once per
 "episode" (until it has been quiet for CLEAR_AFTER_MIN), later posts only
 happen for new regions or when one is upgraded from "heading for" to "over",
-posts are at least GLOBAL_MIN_GAP_MIN apart, and there is a daily cap.
+posts are at least GLOBAL_MIN_GAP_MIN apart (no daily cap).
 Regions that don't fit in one post stay un-announced and are picked up by the
 next one.
 
@@ -70,8 +70,8 @@ MIN_REGION_COVERAGE = 0.5  # share of a region inside radar coverage; no coverag
 # --- how often ----------------------------------------------------------------
 CLEAR_AFTER_MIN = 45       # a region must be quiet this long before a new storm there is a NEW episode
 MIN_GAP_MIN = 30           # minimum time between two posts about the same region
-GLOBAL_MIN_GAP_MIN = 20    # minimum time between any two posts
-MAX_POSTS_PER_DAY = 12     # safety cap while in shadow mode (IST calendar day)
+GLOBAL_MIN_GAP_MIN = 30    # minimum time between any two posts
+MAX_POSTS_PER_DAY = None   # no daily cap (removed 7 Oct: it blocked the afternoon storms); set a number to re-enable
 MAX_NAMED_REGIONS = 6      # a post names at most this many; the rest become "+N more districts" (and count as announced)
 
 DECISION_LOG_MAX_LINES = 1500
@@ -329,7 +329,7 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime) -> tuple[str, str, s
     if gap < GLOBAL_MIN_GAP_MIN:
         return "skip", f"{len(changed)} change(s) waiting, last post was {gap:.0f} min ago (< {GLOBAL_MIN_GAP_MIN})", set()
     today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
-    if state.get("posts", {}).get(today, 0) >= MAX_POSTS_PER_DAY:
+    if MAX_POSTS_PER_DAY is not None and state.get("posts", {}).get(today, 0) >= MAX_POSTS_PER_DAY:
         return "skip", f"daily cap of {MAX_POSTS_PER_DAY} posts reached", set()
     return "send", f"{len(new)} new, {len(upgraded)} upgraded", changed
 
