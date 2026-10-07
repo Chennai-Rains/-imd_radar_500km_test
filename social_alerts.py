@@ -62,6 +62,7 @@ MAX_LEAD_MIN = 90          # the export carries layers out to +90 min
 # Names as the audience writes them (the boundary file uses other spellings).
 RENAME = {"Thiruvallur": "Tiruvallur", "Viluppuram": "Villupuram", "Thoothukkudi": "Thoothukudi",
           "Tirupathur": "Tirupattur", "Thiruvarur": "Tiruvarur"}
+USE_PLACES = False   # districts are what the audience expects (7 Oct); place mode stays available (assets/tn_places.json)
 PLACE_RENAME = {"Kallakuruchi": "Kallakurichi", "Kanchipuram": "Kancheepuram", "Viluppuram": "Villupuram",
                 "Thiruvarur": "Tiruvarur", "Giingee": "Gingee", "Tiruppattur": "Tirupattur",
                 "Tiruppur": "Tirupur", "Udhagamandalam": "Ooty (Udhagamandalam)"}
@@ -214,7 +215,7 @@ def haversine_km(lat1, lon1, lat2, lon2) -> float:
 
 def build_regions(lats, lons, geojson_path: Path = TN_GEOJSON) -> list[Region]:
     """Places (OSM towns and cities) when assets/tn_places.json exists, else districts."""
-    if TN_PLACES.exists() and geojson_path == TN_GEOJSON:
+    if USE_PLACES and TN_PLACES.exists() and geojson_path == TN_GEOJSON:
         return build_place_regions(lats, lons)
     return build_district_regions(lats, lons, geojson_path)
 
@@ -375,27 +376,32 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime) -> tuple[str, str, s
 
 
 # --- the wording -----------------------------------------------------------------------
-def overall_motion(exp: Export, hits: list[Hit]) -> str:
-    """"moving NE ~25 km/h" from the strong rain areas near the listed regions,
-    only when they agree on direction; otherwise nothing (better silent than wrong)."""
+def motion_bearing(exp: Export, hits: list[Hit]) -> float | None:
+    """Direction (degrees, towards) the strong rain areas near these regions are moving,
+    only when they agree and are not slow; otherwise None (better silent than wrong)."""
     vecs, wts = [], []
     for ar in exp.doc.get("rain_areas", []):
         sp, br = ar.get("speed_kmh"), ar.get("bearing_deg")
         if not ar.get("has_strong_core") or ar.get("max_dbz", 0) < ALERT_DBZ or sp is None or br is None or sp < 5:
             continue
-        if min(float(haversine_km_arr(ar["lat"], ar["lon"], h.lat, h.lon)) for h in hits) > 120:
+        if not hits or min(float(haversine_km_arr(ar["lat"], ar["lon"], h.lat, h.lon)) for h in hits) > 120:
             continue
         vecs.append((sp * math.sin(math.radians(br)), sp * math.cos(math.radians(br))))
         wts.append(max(ar.get("area_km2", 1.0), 1.0))
     if not vecs:
-        return ""
+        return None
     w = np.array(wts) / sum(wts)
     u = float((np.array([v[0] for v in vecs]) * w).sum()); v = float((np.array([v[1] for v in vecs]) * w).sum())
     mean_speed = float((np.hypot([x[0] for x in vecs], [x[1] for x in vecs]) * w).sum())
     speed = math.hypot(u, v)
     if speed < 8 or speed < 0.85 * mean_speed:     # slow, or the areas disagree on direction
-        return ""
-    return f"Moving {compass(math.degrees(math.atan2(u, v)) % 360)} ~{round(speed / 5) * 5:.0f} km/h."
+        return None
+    return math.degrees(math.atan2(u, v)) % 360
+
+
+def overall_motion(exp: Export, hits: list[Hit]) -> str:
+    b = motion_bearing(exp, hits)
+    return "" if b is None else f"Moving {compass(b)}."
 
 
 def order_hits(hits: list[Hit], changed: set) -> list[Hit]:
@@ -405,40 +411,90 @@ def order_hits(hits: list[Hit], changed: set) -> list[Hit]:
                                        -h.max_dbz, -h.nodes))
 
 
+def region_of_tn(lat: float, lon: float) -> str:
+    """Rough part of Tamil Nadu, for 'isolated storms around X district in North TN'."""
+    if lat >= 12.2:
+        return "North TN"
+    if lat < 9.8:
+        return "South TN"
+    if lon < 77.6:
+        return "West TN"
+    if lat >= 10.2 and lon >= 78.9:
+        return "Delta region"
+    return "Central TN"
+
+
+def _join(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _districts(names: list[str]) -> str:
+    return f"{_join(names)} district" + ("" if len(names) == 1 else "s")
+
+
+ISOLATED_MAX_NODES = 20    # an "over" region with fewer strong nodes than this, away from the main storms, is isolated
+ISOLATED_MIN_KM = 80.0
+
+
 def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
-    """Digest of at most MAX_NAMED_REGIONS names that fits 280 characters; returns the
-    text and the hits it names. The others are summarised as "+N more places"."""
+    """Written like the blog's own thunderstorm tweets: where it is intense now, which way
+    it is moving and where it may go next, then any isolated storms elsewhere. Returns the
+    text and the hits it names; the others become "+N more districts"."""
     asof = fmt_time(exp.generated_utc)
+    over_all = sorted((h for h in hits_ordered if h.status == "over"), key=lambda h: -h.nodes)
+    appr_all = sorted((h for h in hits_ordered if h.status == "approaching"), key=lambda h: h.lead_min)
+    main, iso = [], []
+    if over_all:
+        top = over_all[0]
+        for h in over_all:
+            far = float(haversine_km_arr(h.lat, h.lon, top.lat, top.lon)) > ISOLATED_MIN_KM
+            (iso if (h is not top and far and h.nodes < ISOLATED_MAX_NODES) else main).append(h)
 
-    def compose(sel: list[Hit], dropped: int, with_motion: bool) -> str:
-        over = [h.name for h in sel if h.status == "over"]
-        groups: dict[int, list[str]] = {}
-        for h in sel:
-            if h.status == "approaching":
-                groups.setdefault(h.lead_min, []).append(h.name)
-        appr = "; ".join(f"{', '.join(names)} (~{fmt_time(exp.generated_utc + timedelta(minutes=lead))})"
-                         for lead, names in sorted(groups.items()))
-        if over and appr:
-            body = f"Thunderstorms over {', '.join(over)}; likely movement towards {appr}."
-        elif over:
-            body = f"Thunderstorms over {', '.join(over)}."
-        else:
-            body = f"Thunderstorms likely moving towards {appr}."
+    def intensity(hs):
+        m = max(h.max_dbz for h in hs)
+        return "Intense thunderstorms" if m >= 50 else ("Strong thunderstorms" if m >= 40 else "Thunderstorms")
+
+    def compose(n_main: int, n_appr: int, n_iso: int) -> tuple[str, list[Hit]]:
+        m, a, i = main[:n_main], appr_all[:n_appr], iso[:n_iso]
+        sents = []
+        if m:
+            sents.append(f"{intensity(m)} over parts of {_districts([h.name for h in m])}.")
+        if a:
+            b = motion_bearing(exp, m + a)
+            mv = f"Storms roughly moving {compass((b + 180) % 360)} to {compass(b)}, so they" if b is not None else "Storms"
+            lead = "may move into" if (b is not None or m) else "are likely to move into"
+            tgt = f"districts like {_join([h.name for h in a])}" if len(a) > 1 else f"{a[0].name} district"
+            sents.append(f"{mv} {lead} {tgt} in the coming hours."
+                         if m else f"Thunderstorms likely moving towards {_districts([h.name for h in a])} in the coming hours.")
+        if i:
+            where = region_of_tn(i[0].lat, i[0].lon)
+            sents.append(f"{'Meanwhile isolated' if sents else 'Isolated'} storms around {_districts([h.name for h in i])} in {where}.")
+        listed = m + a + i
+        dropped = len(hits_ordered) - len(listed)
+        body = " ".join(sents)
         if dropped:
-            body += f" (+{dropped} more places)"
-        motion = overall_motion(exp, sel) if with_motion else ""
-        return " ".join(x for x in (f"COMK Automated Radar Nowcast ({asof} IST):", body, motion, HASHTAGS) if x)
+            body += f" (+{dropped} more districts)"
+        return f"COMK Automated Radar Nowcast ({asof} IST): {body} {HASHTAGS}", listed
 
-    def chrono(sel):      # on show: impacting now first, then by when the storm arrives
-        return sorted(sel, key=lambda h: (h.status != "over", h.lead_min))
-
-    for n in range(min(len(hits_ordered), MAX_NAMED_REGIONS), 0, -1):
-        for with_motion in (False,):
-            sel = chrono(hits_ordered[:n])
-            text = compose(sel, len(hits_ordered) - n, with_motion)
-            if len(text) <= 280:
-                return text, sel
-    return compose(hits_ordered[:1], len(hits_ordered) - 1, False)[:280], hits_ordered[:1]
+    n_m, n_a, n_i = min(len(main), MAX_NAMED_REGIONS), min(len(appr_all), 4), min(len(iso), 2)
+    while True:
+        text, listed = compose(n_m, n_a, n_i)
+        if len(text) <= 400 or (n_m + n_a + n_i) <= 1:
+            return text, listed
+        if n_a > 2:
+            n_a -= 1
+        elif n_m > 3:
+            n_m -= 1
+        elif n_a > 1:
+            n_a -= 1
+        elif n_i > 1:
+            n_i -= 1
+        elif n_m > 1:
+            n_m -= 1
+        elif n_i:
+            n_i -= 1
+        else:
+            n_a -= 1
 
 
 def build_details(listed: list[Hit], all_ordered: list[Hit]) -> str:
