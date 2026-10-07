@@ -1,0 +1,33 @@
+name: Fetch OSM places
+
+# One-off utility (not part of the polling pipeline): downloads towns and
+# cities for Tamil Nadu from OpenStreetMap (Overpass) and commits the thinned
+# list to assets/tn_places.json, which social_alerts.py uses to name places.
+# This workspace cannot reach OSM, so it runs here. (c) OpenStreetMap contributors, ODbL.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-places:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install matplotlib
+      - run: python tools/fetch_osm_places.py
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Add OSM places gazetteer (towns and cities)"
+          file_pattern: "assets/tn_places.json"
+          commit_user_name: "nowcast-bot"
+          commit_user_email: "actions@users.noreply.github.com"
