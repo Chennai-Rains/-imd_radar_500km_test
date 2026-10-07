@@ -561,6 +561,10 @@ PRODUCTS = {
     # image can't reach.
     "cni_ppz": {
         "url": "https://mausam.imd.gov.in/Radar/ppz_cni.gif",
+        # Same single-row colour-bar swatch fix as cni_maxz (see there): stray
+        # khaki rows matched terrain shading and gave ~200 false 35-40 dBZ px
+        # on about 20 archived frames since 1 Oct.
+        "min_swatch_rows": 2,
         "role": "regional_early_warning",
         "range_km": 600.0,         # printed directly ("Range: 600 km") -- genuinely more reach than Karaikal's 500km kkl_ppz
         "elevation_deg": -0.2,     # printed directly ("Elevation: -0.2 deg") -- a real single low-angle tilt, not a column-max product
