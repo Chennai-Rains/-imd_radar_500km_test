@@ -4,7 +4,7 @@ Run by .github/workflows/fetch_osm_places.yml (this workspace cannot reach OSM).
 Output: a thinned list of places, each {name, lat, lon, kind, district}.
 Data (c) OpenStreetMap contributors, ODbL.
 """
-import json, math, sys, time
+import difflib, json, math, sys, time
 import urllib.parse, urllib.request
 from pathlib import Path
 from matplotlib.path import Path as MPath
@@ -15,10 +15,9 @@ ENDPOINTS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.s
 QUERY = """[out:json][timeout:180];
 (
   node["place"~"^(city|town)$"](8.0,76.2,13.7,80.5);
-  node["place"="suburb"](12.55,79.85,13.45,80.45);
 );
 out tags center;"""
-THIN_KM = 12.0          # drop a place if a more important one is within this distance
+THIN_KM = 9.0          # drop a place if a more important one is within this distance
 CHENNAI = (13.0827, 80.2707)
 
 
@@ -69,8 +68,6 @@ def main():
         if lat is None:
             continue
         kind = t["place"]
-        if kind == "suburb" and km((lat, lon), CHENNAI) > 45:
-            continue
         d = district_of(lon, lat)
         if d is None:
             continue
@@ -78,14 +75,16 @@ def main():
             pop = int(str(t.get("population", "0")).replace(",", ""))
         except ValueError:
             pop = 0
-        rank = {"city": 0, "town": 1, "suburb": 2}[kind]
+        rank = {"city": 1, "town": 2}[kind]
+        # district headquarters first, so they are never thinned away by a neighbour
+        if any(difflib.SequenceMatcher(None, name.lower(), dn.lower()).ratio() >= 0.82 for dn, _ in dists):
+            rank = 0
         cand.append({"name": name, "lat": round(lat, 4), "lon": round(lon, 4), "kind": kind,
                      "district": d, "pop": pop, "rank": rank})
     cand.sort(key=lambda p: (p["rank"], -p["pop"], p["name"]))
     kept = []
     for p in cand:
-        # Chennai suburbs sit close together on purpose: thin them less
-        thin = 5.0 if p["kind"] == "suburb" else THIN_KM
+        thin = THIN_KM
         if any(km((p["lat"], p["lon"]), (k["lat"], k["lon"])) < thin for k in kept):
             continue
         kept.append(p)
