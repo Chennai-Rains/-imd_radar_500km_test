@@ -55,6 +55,7 @@ TN_PLACES = HERE / "assets" / "tn_places.json"   # towns and cities from OpenStr
 # --- where / how strong ------------------------------------------------------
 CHENNAI = (13.0827, 80.2707)
 CHENNAI_ZONE_KM = 40.0     # "Chennai": city + immediate suburbs (the old single zone)
+CORE_DBZ = 45.0            # core of a storm, for the Intense category
 ALERT_DBZ = 35.0           # grid node counts as strong echo at/above this
 MIN_REGION_NODES = 8       # grid step is ~2.2 km (~5 km2/node): ~40 km2 of strong echo. 6 nodes on an edge was a real false alarm (5 Oct)
 MAX_LEAD_MIN = 90          # the export carries layers out to +90 min
@@ -260,6 +261,7 @@ class Hit:
     when_utc: datetime
     lat: float                 # centre of the strong echo in the region at that lead
     lon: float
+    core45: int = 0            # most nodes at/above CORE_DBZ at any lead (a real core, not one spike)
 
 
 @dataclass
@@ -301,7 +303,7 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) 
         if (first_layer != 255).mean() < MIN_REGION_COVERAGE:
             uncovered.append(reg.name)
             continue
-        first, nodes_first, max_dbz, cen = None, 0, 0.0, None
+        first, nodes_first, max_dbz, cen, core = None, 0, 0.0, None, 0
         for lead, i in idx:
             v = exp.grid[i][reg.rs, reg.cs]
             strong = (v >= ALERT_DBZ) & (v < 255) & reg.sub
@@ -312,9 +314,10 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) 
                     ys, xs = np.where(strong)
                     cen = (float(exp.lats[reg.rs][ys].mean()), float(exp.lons[reg.cs][xs].mean()))
                 max_dbz = max(max_dbz, float(v[strong].max()))
+                core = max(core, int(((v >= CORE_DBZ) & (v < 255) & reg.sub).sum()))
         if first is not None:
             hits.append(Hit(reg.name, "over" if first == 0 else "approaching", first, max_dbz, nodes_first,
-                            exp.generated_utc + timedelta(minutes=first), cen[0], cen[1]))
+                            exp.generated_utc + timedelta(minutes=first), cen[0], cen[1], core))
     return Assessment(True, "ok", hits, uncovered, len(regions))
 
 
@@ -360,7 +363,7 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime) -> tuple[str, str, s
         st = regs[h.name]
         if not st.get("active"):
             new.append(h.name); changed.add(h.name); continue
-        _, rank = severity_label(h.max_dbz)
+        rank = 2 if is_intense(h) else 1     # Thunderstorms -> Intense thunderstorms counts as an upgrade
         went_over = h.status == "over" and st.get("last_status") == "approaching"
         if (went_over or rank > st.get("last_rank", 0)) and _mins(now_utc, _dt(st.get("last_post"))) >= MIN_GAP_MIN:
             upgraded.append(h.name); changed.add(h.name)
@@ -432,8 +435,18 @@ def _districts(names: list[str]) -> str:
     return f"{_join(names)} district" + ("" if len(names) == 1 else "s")
 
 
+# "Intense thunderstorms": peak at/above INTENSE_DBZ AND a real core (INTENSE_CORE_NODES nodes at/above
+# CORE_DBZ, about 15 km2), so one stray bright node does not promote a district. Set from a replay of 64
+# alert cycles (6-10 Oct 2026, 226 district-hits): about 1 in 5 hits is Intense, in about 4 of 10 cycles.
+INTENSE_DBZ = 48.0
+INTENSE_CORE_NODES = 3
 ISOLATED_MAX_NODES = 20    # an "over" region with fewer strong nodes than this, away from the main storms, is isolated
 ISOLATED_MIN_KM = 80.0
+
+
+def is_intense(h: Hit) -> bool:
+    """Two categories only: "Thunderstorms" and "Intense thunderstorms" (see INTENSE_DBZ)."""
+    return h.max_dbz >= INTENSE_DBZ and h.core45 >= INTENSE_CORE_NODES
 
 
 def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
@@ -450,22 +463,23 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
             far = float(haversine_km_arr(h.lat, h.lon, top.lat, top.lon)) > ISOLATED_MIN_KM
             (iso if (h is not top and far and h.nodes < ISOLATED_MAX_NODES) else main).append(h)
 
-    def intensity(hs):
-        m = max(h.max_dbz for h in hs)
-        return "Intense thunderstorms" if m >= 50 else ("Strong thunderstorms" if m >= 40 else "Thunderstorms")
-
     def compose(n_main: int, n_appr: int, n_iso: int) -> tuple[str, list[Hit]]:
         m, a, i = main[:n_main], appr_all[:n_appr], iso[:n_iso]
         sents = []
-        if m:
-            sents.append(f"{intensity(m)} over parts of {_districts([h.name for h in m])}.")
+        m_int, m_norm = [h for h in m if is_intense(h)], [h for h in m if not is_intense(h)]
+        if m_int:
+            sents.append(f"Intense thunderstorms over parts of {_districts([h.name for h in m_int])}.")
+        if m_norm:
+            sents.append(f"Thunderstorms over parts of {_districts([h.name for h in m_norm])}.")
         if a:
             b = motion_bearing(exp, m + a)
-            mv = f"Storms roughly moving {compass((b + 180) % 360)} to {compass(b)}, so they" if b is not None else "Storms"
-            lead = "may move into" if (b is not None or m) else "are likely to move into"
-            tgt = f"districts like {_join([h.name for h in a])}" if len(a) > 1 else f"{a[0].name} district"
-            sents.append(f"{mv} {lead} {tgt} in the coming hours."
-                         if m else f"Thunderstorms likely moving towards {_districts([h.name for h in a])} in the coming hours.")
+            tgt = f"parts of {_districts([h.name for h in a])}"
+            if m:
+                mv = (f"Storms roughly moving {compass((b + 180) % 360)} to {compass(b)}, so they are likely to move into"
+                      if b is not None else "Storms are likely to move into")
+                sents.append(f"{mv} {tgt} in the coming hours.")
+            else:
+                sents.append(f"Thunderstorms are likely to move into {tgt} in the coming hours.")
         if i:
             where = region_of_tn(i[0].lat, i[0].lon)
             sents.append(f"{'Meanwhile isolated' if sents else 'Isolated'} storms around {_districts([h.name for h in i])} in {where}.")
@@ -502,14 +516,14 @@ def build_details(listed: list[Hit], all_ordered: list[Hit]) -> str:
     in roughly how many minutes. No dBZ or node counts (those stay in the decision log)."""
     now_ = [h for h in listed if h.status == "over"]
     soon = sorted((h for h in listed if h.status == "approaching"), key=lambda h: h.lead_min)
-    lines = [f"- {h.name}: Now impacting" for h in now_]
-    lines += [f"- {h.name}: In roughly {h.lead_min} minutes" for h in soon]
+    lines = [f"- {h.name} Dt.: Now impacting" for h in now_]
+    lines += [f"- {h.name} Dt.: In roughly {h.lead_min} minutes" for h in soon]
     rest = [h.name for h in sorted((h for h in all_ordered if h not in listed),
                                    key=lambda h: (h.status != "over", h.lead_min))]
     if rest:
         shown = rest[:10]   # keep the caption inside Telegram's length limit on big days
         more = f" (+{len(rest) - len(shown)} others)" if len(rest) > len(shown) else ""
-        lines.append(f"- ...and {len(rest)} more: " + ", ".join(shown) + more)
+        lines.append(f"- ...and {len(rest)} more districts: " + ", ".join(shown) + more)
     return "\n".join(lines)
 
 
@@ -901,7 +915,8 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
     entry = {"t": now_utc.isoformat(timespec="seconds"), "action": action, "reason": reason,
              "over": [h.name for h in a.hits if h.status == "over"],
              "heading": {h.name: h.lead_min for h in a.hits if h.status == "approaching"},
-             "max_dbz": round(max((h.max_dbz for h in a.hits), default=0.0), 1)}
+             "max_dbz": round(max((h.max_dbz for h in a.hits), default=0.0), 1),
+             "hits": {h.name: [h.status[0], h.max_dbz, h.core45, h.nodes] for h in a.hits}}   # status, peak dBZ, core nodes, strong nodes
     if a.uncovered:
         entry["no_coverage"] = len(a.uncovered)
 
@@ -928,7 +943,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         if sent:
             regs = state.setdefault("regions", {})
             for h in a.hits:       # everything summarised in this post (named or "+N more") counts as announced
-                _, rank = severity_label(h.max_dbz)
+                rank = 2 if is_intense(h) else 1     # Thunderstorms -> Intense thunderstorms counts as an upgrade
                 regs[h.name].update(active=True, last_post=now_utc.isoformat(), last_status=h.status, last_rank=rank)
             state["last_post_utc"] = now_utc.isoformat()
             today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
