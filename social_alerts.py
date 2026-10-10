@@ -770,20 +770,9 @@ def _record_telegram(ok: bool, detail: str) -> None:
         pass
 
 
-def send_telegram(caption: str, image_path: Path | None) -> bool:
-    """True only if Telegram accepted it. No credentials -> False (a dry run,
-    never an error), so state is not marked as posted."""
-    token, chat = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(), os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat:
-        missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", token), ("TELEGRAM_CHAT_ID", chat)) if not v]
-        msg = f"secret(s) empty or not visible to this repo's workflow: {', '.join(missing)}"
-        print(f"[social] {msg} -- draft only, nothing sent")
-        _record_telegram(False, msg)
-        return False
-    caption = caption[:1020]
+def _send_one(token: str, chat: str, caption: str, images: list) -> tuple[bool, str]:
+    """One chat (group, channel or person). Returns (accepted, detail)."""
     try:
-        images = [Path(x) for x in (image_path if isinstance(image_path, (list, tuple)) else [image_path]) if x]
-        images = [x for x in images if x.exists()]
         if len(images) > 1:
             handles = [open(x, "rb") for x in images[:10]]
             try:
@@ -796,8 +785,7 @@ def send_telegram(caption: str, image_path: Path | None) -> bool:
                 for fh in handles:
                     fh.close()
         elif images:
-            image_path = images[0]
-            with open(image_path, "rb") as fh:
+            with open(images[0], "rb") as fh:
                 r = requests.post(f"https://api.telegram.org/bot{token}/sendPhoto",
                                   data={"chat_id": chat, "caption": caption},
                                   files={"photo": fh}, timeout=30)
@@ -805,15 +793,35 @@ def send_telegram(caption: str, image_path: Path | None) -> bool:
             r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
                               data={"chat_id": chat, "text": caption}, timeout=30)
         ok = r.ok and r.json().get("ok", False)
-        detail = "sent" if ok else f"Telegram refused: HTTP {r.status_code} {r.text[:200]}"
-        if not ok:
-            print(f"[social] {detail}")
-        _record_telegram(bool(ok), detail)
-        return bool(ok)
+        return bool(ok), "sent" if ok else f"Telegram refused: HTTP {r.status_code} {r.text[:200]}"
     except Exception as e:
-        print(f"[social] Telegram send failed: {e!r}")
-        _record_telegram(False, f"request failed: {type(e).__name__}")
+        return False, f"request failed: {type(e).__name__}"
+
+
+def send_telegram(caption: str, image_path: Path | None) -> bool:
+    """TELEGRAM_CHAT_ID may hold several chat ids separated by commas (e.g. a group and a
+    channel); the draft goes to each. True if Telegram accepted it for at least one of them.
+    No credentials -> False (a dry run, never an error), so state is not marked as posted."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chats = [c.strip() for c in os.environ.get("TELEGRAM_CHAT_ID", "").replace(";", ",").split(",") if c.strip()]
+    if not token or not chats:
+        missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", token), ("TELEGRAM_CHAT_ID", chats)) if not v]
+        msg = f"secret(s) empty or not visible to this repo's workflow: {', '.join(missing)}"
+        print(f"[social] {msg} -- draft only, nothing sent")
+        _record_telegram(False, msg)
         return False
+    caption = caption[:1020]
+    images = [Path(x) for x in (image_path if isinstance(image_path, (list, tuple)) else [image_path]) if x]
+    images = [x for x in images if x.exists()]
+    results = [(c, *_send_one(token, c, caption, images)) for c in dict.fromkeys(chats)]
+    for c, ok, detail in results:
+        if not ok:
+            print(f"[social] chat {c[:6]}...: {detail}")   # id shortened in logs
+    n_ok = sum(1 for _, ok, _ in results if ok)
+    detail = "sent" if n_ok == len(results) else (f"sent to {n_ok} of {len(results)} chats; " +
+             "; ".join(d for _, ok, d in results if not ok))
+    _record_telegram(n_ok > 0, detail)
+    return n_ok > 0
 
 
 # --- synthetic data (link check + tests) --------------------------------------------------
