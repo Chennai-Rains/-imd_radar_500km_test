@@ -745,6 +745,7 @@ PRODUCTS = {
         # strong blobs (>=36 dBZ) under 45 px (~36 km2) are capped below 35:
         # ridge clutter along the Idukki-Theni Ghats, see decode_reflectivity
         "min_strong_blob": (36.0, 45),
+        "max_range_km": 160.0,
     },
 
     "mlr_maxz": {
@@ -1566,6 +1567,17 @@ def decode_reflectivity(img: Image.Image, product: str, lut: list) -> np.ndarray
         yy, xx = np.mgrid[0:h, 0:w]
         dist_km = np.hypot(xx - (site_x - l), yy - (site_y - t)) / km_per_px
         dbz[dist_km < mask_within_km] = np.nan
+
+    max_range_km = cfg.get("max_range_km")
+    if max_range_km is not None:
+        # Far-field cut-off, first for tvm_maxz: beyond ~160 km its picture
+        # (clutter filter OFF) carries ridge-aligned strong specks over the
+        # Idukki-Munnar-Theni Ghats that raised false "intense" alerts on
+        # 11 Oct 2026. Opt-in, no-op elsewhere.
+        site_x, site_y = cfg["site_px"]
+        yy, xx = np.mgrid[0:h, 0:w]
+        far = np.hypot(xx - (site_x - l), yy - (site_y - t)) / cfg["km_per_px"] > max_range_km
+        dbz[far] = np.nan
 
     despeckle_min_px = cfg.get("despeckle_min_px")
     if despeckle_min_px is not None:
