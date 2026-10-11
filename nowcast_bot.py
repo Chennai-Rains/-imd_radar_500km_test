@@ -937,6 +937,7 @@ AUTOREFRESH_MINUTES = 5
 # poll cadence to allow for IMD's own ordinary publishing lag without
 # false-flagging a normal reading.
 STALE_OBS_MINUTES = 60
+BOT_STALE_MINUTES = 40   # per-radar age limit for the bot export / alerts (the map keeps 60)
 
 # Direction arrows are only reliable where the underlying imagery is full
 # resolution. Karaikal cells detected out on the 250-500km extended ring
@@ -3597,10 +3598,14 @@ def _bot_fresh_products(products: tuple, now_utc: datetime) -> list[str]:
     """Same rule build_forecast_map uses to decide what is drawn: a product
     with a known observation time older than STALE_OBS_MINUTES is dropped;
     one whose time could not be read is kept."""
+    # The bot is held to a stricter age than the map (BOT_STALE_MINUTES): on
+    # 12 Oct 2026 a Trivandrum frame 55 min old (that radar publishes late and
+    # erratically) was still read as "now" while Karaikal kept the overall
+    # freshness check satisfied, and fed a 3:41 AM alert for echo seen at 2:46.
     return [p for p in products
             if p in _last_dbz and (
                 _last_obs_time_seen.get(p) is None
-                or (now_utc - _last_obs_time_seen[p]).total_seconds() / 60.0 <= STALE_OBS_MINUTES)]
+                or (now_utc - _last_obs_time_seen[p]).total_seconds() / 60.0 <= BOT_STALE_MINUTES)]
 
 
 def _bot_grid_axes(products: tuple) -> tuple[np.ndarray, np.ndarray]:
