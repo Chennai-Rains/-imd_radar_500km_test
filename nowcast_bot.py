@@ -778,6 +778,7 @@ PRODUCTS = {
         "min_swatch_rows": 2,
         "despeckle_min_px": 8,
         "min_strong_blob": (36.0, 45),
+        "min_strong_core": (36.0, 5),
         # inner 125 km only: ridge echo over Idukki/Theni/Dindigul caused false
         # alerts on 11 Oct 2026 even on the 2 deg tilt
         "max_range_km": 125.0,
@@ -1716,6 +1717,21 @@ def decode_reflectivity(img: Image.Image, product: str, lut: list) -> np.ndarray
             small = np.flatnonzero(sz < min_px) + 1
             if len(small):
                 dbz[np.isin(lab_s, small)] = thr - 2.0
+
+    core = cfg.get("min_strong_core")
+    if core:
+        # tvm_ppi (12 Oct 2026): a 25 km x 3.5 km streak of 54 dBZ along the
+        # Ghats showed in a single frame and later fed an "intense" alert,
+        # while no strong storm existed. Real storm cores (the midnight
+        # Kanyakumari cells) hold a solid k x k block of strong pixels; thin
+        # streaks do not. A connected strong (>= thr) area with no k x k block
+        # anywhere inside it is capped just below thr; areas that do contain
+        # one are kept whole. Opt-in, no-op elsewhere.
+        thr, k = core
+        strong_m = np.nan_to_num(dbz, nan=0.0) >= thr
+        solid = ndimage.binary_opening(strong_m, structure=np.ones((k, k)))
+        keep = ndimage.binary_propagation(solid, structure=np.ones((3, 3)), mask=strong_m)
+        dbz[strong_m & ~keep] = thr - 2.0
 
     if cfg.get("erode_thin_residual"):
         # First needed for mlr_maxz: its static_exclude_mask (a per-pixel
