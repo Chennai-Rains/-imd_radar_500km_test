@@ -157,6 +157,18 @@ RADAR_SITES = {
         "site_elev_m": 90.0,       # UNVERIFIED -- Bajpe plateau elevation, public-estimate
         "band": "S",               # UNVERIFIED -- assumed consistent with Chennai/Kochi/Karaikal coastal DWRs, not confirmed for this site
     },
+
+    # --- Sixth radar: IMD's Trivandrum (Thumba, "CDWRTERLS") MAXZ, caz_tvm.gif.
+    # Added 11 Oct 2026 to the TEST repo only, while Kochi is under maintenance;
+    # its update schedule is erratic compared with the other radars. Site
+    # coordinates are the ones the frame prints itself ("8.5374N, 76.8657E",
+    # height 27 m); 240 km range, 0.9 km per pixel.
+    "trivandrum": {
+        "site_lat": 8.5374,
+        "site_lon": 76.8657,
+        "site_elev_m": 27.0,       # printed in the frame's metadata panel
+        "band": "S",               # UNVERIFIED -- not stated on the frame
+    },
 }
 
 PRODUCT_RADAR = {
@@ -165,6 +177,7 @@ PRODUCT_RADAR = {
     "koc_maxz": "kochi",
     "cni_maxz": "chennai", "cni_ppz": "chennai",
     "mlr_maxz": "mangalore",
+    "tvm_maxz": "trivandrum",
 }
 
 EFFECTIVE_EARTH_RADIUS_KM = 8494.0  # standard 4/3-Earth-radius model
@@ -695,6 +708,42 @@ PRODUCTS = {
     #    build_lut_from_colorbar() samples the horizontal-middle column of
     #    this bbox per source row, so including any of that black border
     #    would corrupt the LUT with spurious near-black entries.
+    # --- Trivandrum DWR (TERLS, Thumba): a seventh layout -- polar plan view
+    # (range rings + azimuth lines, black coastline/borders on a flat grey
+    # background, no terrain shading), cross-section strips across the top and
+    # down the right, a 15-band colour bar in 4 dBZ steps. Measured from a real
+    # frame (1082x720): azimuth lines cross at (300, 438); the 240 km ring spans
+    # x 33-567 so 1 px = 0.9 km (printed "Display Res: 0.9 Km/Pix").
+    "tvm_maxz": {
+        "url": "https://mausam.imd.gov.in/Radar/caz_tvm.gif",
+        "role": "aloft_early_warning",
+        "range_km": 240.0,         # printed "Display Range: 240 Km"
+        "elevation_deg": None,     # column-max, like every other MAXZ product here
+        "image_size": (1082, 720),
+        "site_px": (300.0, 438.0),
+        "km_per_px": 1.1111,       # pixels per km (1 / 0.9), see the note on km_per_px
+        # 15 swatches, each 16 rows tall with a 2-row grey gap, y 428-695,
+        # x 748-783. Each band is 4 dBZ wide (0-4 at the bottom ... 56-60+ at
+        # the top), so every colour gets the middle of its band instead of a
+        # value interpolated across the swatch (see "colorbar_bands").
+        "colorbar_bbox": (748, 428, 784, 696),
+        "colorbar_bands": [58.0, 54.0, 50.0, 46.0, 42.0, 38.0, 34.0, 30.0, 26.0, 22.0, 18.0, 14.0, 10.0, 6.0, 2.0],
+        "value_at_top": 60.0,
+        "value_at_bottom": 0.0,
+        "timestamp_bbox": (0, 0, 425, 45),   # big "2026/10/11" and "00:49:33 (UTC)"
+        "elevation_bbox": None,
+        "plot_bbox": (0, 176, 564, 720),     # plan view only: not the top strip, the right strip or the colour bar
+        "cell_dbz_threshold": 35,
+        # The gaps between colour-bar swatches are the same grey (204,204,204)
+        # as the plot background: without this every background pixel would
+        # decode as echo.
+        "exclude_colors": [(204, 204, 204)],
+        "min_swatch_rows": 2,
+        # a few 2-4 px specks of strong-looking colour sit on the map
+        # (station marks), well below any storm
+        "despeckle_min_px": 8,
+    },
+
     "mlr_maxz": {
         "url": "https://mausam.imd.gov.in/Radar/caz_mlr.gif",
         "role": "aloft_early_warning",
@@ -1200,7 +1249,11 @@ def extract_observation_time(img: Image.Image, product: str) -> datetime | None:
     # patterns.
     m = re.search(r"Date:\s*(\d{1,2}/\d{1,2}/\d{4}).*?Time:\s*(\d{2}:\d{2}:\d{2})\s*UTC",
                    text, re.DOTALL)
-    if m:
+    tvm = re.search(r"(\d{4}/\d{2}/\d{2})\s*(\d{2}:\d{2}:\d{2})\s*\(?\s*UTC", text)
+    if tvm:
+        # Trivandrum: "2026/10/11" then "00:49:33 (UTC)", year first
+        date_str, time_str, date_fmt = tvm.group(1), tvm.group(2), "%Y/%m/%d"
+    elif m:
         date_str, time_str, date_fmt = m.group(1), m.group(2), "%d/%m/%Y"
     else:
         # \D{0,3} before the day: Tesseract occasionally inserts a stray
@@ -1324,10 +1377,16 @@ def build_lut_from_colorbar(img: Image.Image, product: str) -> list[tuple[tuple[
         top_val, bot_val = cfg["value_at_top"], cfg["value_at_bottom"]
         values = top_val + (bot_val - top_val) * (np.arange(h) / (h - 1))
 
+    bands = cfg.get("colorbar_bands")
     lut = []
     for y in range(h):
         rgb = tuple(int(v) for v in bar[y, bar.shape[1] // 2])
-        lut.append((rgb, round(float(values[y]), 1)))
+        if bands:
+            # equal-height bands, top to bottom: every row of a band gets that band's value
+            val = bands[min(int(y / h * len(bands)), len(bands) - 1)]
+        else:
+            val = round(float(values[y]), 1)
+        lut.append((rgb, val))
     min_rows = cfg.get("min_swatch_rows")
     if min_rows:
         from collections import Counter
@@ -1896,10 +1955,11 @@ PRODUCT_STYLE = {
     "cni_maxz": {"color": "#e377c2", "label": "Chennai DWR MAXZ - aloft / building"},
     "cni_ppz": {"color": "#7f7f7f", "label": "Chennai Extended Radar"},
     "mlr_maxz": {"color": "#bcbd22", "label": "Mangaluru DWR MAXZ - aloft / building"},
+    "tvm_maxz": {"color": "#9467bd", "label": "Trivandrum DWR MAXZ - aloft / building"},
 }
 
 RADAR_MARKER_LABEL = {"niot": "NIOT X-DWR Chennai", "karaikal": "Karaikal DWR",
-                       "kochi": "Kochi DWR"}
+                       "kochi": "Kochi DWR", "trivandrum": "Trivandrum DWR"}
 
 # CARTO now requires an API key even for the free Voyager basemap tiles.
 # NOTE: this key travels in the tile URL itself, so it's visible to anyone
