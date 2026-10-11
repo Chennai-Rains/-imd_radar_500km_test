@@ -742,6 +742,9 @@ PRODUCTS = {
         # a few 2-4 px specks of strong-looking colour sit on the map
         # (station marks), well below any storm
         "despeckle_min_px": 8,
+        # strong blobs (>=36 dBZ) under 45 px (~36 km2) are capped below 35:
+        # ridge clutter along the Idukki-Theni Ghats, see decode_reflectivity
+        "min_strong_blob": (36.0, 45),
     },
 
     "mlr_maxz": {
@@ -1586,6 +1589,25 @@ def decode_reflectivity(img: Image.Image, product: str, lut: list) -> np.ndarray
             small_labels = np.flatnonzero(sizes < despeckle_min_px) + 1
             if len(small_labels):
                 dbz[np.isin(labeled, small_labels)] = np.nan
+
+    strong = cfg.get("min_strong_blob")
+    if strong:
+        # First needed for tvm_maxz (11 Oct 2026): with the radar's clutter
+        # filter OFF, a ragged string of 1-38 px orange/red specks appeared
+        # along the Kerala-Tamil Nadu ridge (Idukki-Theni) for a single scan
+        # and read as 50 dBZ storms over Theni district. Real convective
+        # cores are far larger than that, so an isolated blob of strong
+        # echo smaller than "px" pixels is capped just below the threshold
+        # (it stays on the map as weak echo, but cannot raise an alert).
+        # Opt-in, no-op for every product that does not set it.
+        thr, min_px = strong
+        big = np.nan_to_num(dbz, nan=0.0) >= thr
+        lab_s, n_s = ndimage.label(big, structure=np.ones((3, 3)))
+        if n_s > 0:
+            sz = ndimage.sum(big, lab_s, index=np.arange(1, n_s + 1))
+            small = np.flatnonzero(sz < min_px) + 1
+            if len(small):
+                dbz[np.isin(lab_s, small)] = thr - 2.0
 
     if cfg.get("erode_thin_residual"):
         # First needed for mlr_maxz: its static_exclude_mask (a per-pixel
