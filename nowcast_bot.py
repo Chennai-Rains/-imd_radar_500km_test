@@ -1535,7 +1535,7 @@ DIST_THRESHOLD = 2
 
 
 def radial_spoke_mask(dbz: np.ndarray, site_local: tuple, px_per_km: float,
-                      min_km: float = 60.0, gap_km: float = 8.0,
+                      min_km: float = 50.0, gap_km: float = 16.0,
                       az_bin: float = 0.5, side_bins: int = 3) -> np.ndarray:
     """True where decoded echo lies on a radial interference spoke.
 
