@@ -177,7 +177,7 @@ PRODUCT_RADAR = {
     "koc_maxz": "kochi",
     "cni_maxz": "chennai", "cni_ppz": "chennai",
     "mlr_maxz": "mangalore",
-    "tvm_maxz": "trivandrum",
+    "tvm_maxz": "trivandrum", "tvm_ppi": "trivandrum",
 }
 
 EFFECTIVE_EARTH_RADIUS_KM = 8494.0  # standard 4/3-Earth-radius model
@@ -746,6 +746,36 @@ PRODUCTS = {
         # ridge clutter along the Idukki-Theni Ghats, see decode_reflectivity
         "min_strong_blob": (36.0, 45),
         "max_range_km": 160.0,
+    },
+
+    # --- Trivandrum PPI (ppi_tvm.gif), 2.0 deg elevation. Added 11 Oct 2026 to
+    # replace tvm_maxz in the test repo: the column-max picture carried false
+    # strong echo along the Ghats ridge (clutter filter OFF), the 2 deg tilt
+    # does not. Same frame layout family as tvm_maxz but the plan view is
+    # bigger: azimuth lines cross at (369, 371), the outer 240 km ring has a
+    # 326 px radius (1 px = 0.736 km), plan view x 0-737, y 41-700. Colour bar
+    # is the same 15 swatches (x 748-783, y 428-695) but each band is 4.33 dBZ
+    # wide (0-4.33 at the bottom ... 60.67-65+ at the top).
+    "tvm_ppi": {
+        "url": "https://mausam.imd.gov.in/Radar/ppi_tvm.gif",
+        "role": "aloft_early_warning",
+        "range_km": 240.0,
+        "elevation_deg": 2.0,
+        "image_size": (1082, 720),
+        "site_px": (369.0, 371.0),
+        "km_per_px": 1.3583,       # pixels per km (326 px / 240 km)
+        "colorbar_bbox": (748, 428, 784, 696),
+        "colorbar_bands": [63.0, 58.5, 54.2, 49.8, 45.5, 41.2, 36.8, 32.5, 28.2, 23.8, 19.5, 15.2, 10.8, 6.5, 2.2],
+        "value_at_top": 65.0,
+        "value_at_bottom": 0.0,
+        "timestamp_bbox": (0, 0, 425, 45),
+        "elevation_bbox": None,
+        "plot_bbox": (0, 41, 738, 700),
+        "cell_dbz_threshold": 35,
+        "exclude_colors": [(204, 204, 204)],
+        "min_swatch_rows": 2,
+        "despeckle_min_px": 8,
+        "min_strong_blob": (36.0, 45),
     },
 
     "mlr_maxz": {
@@ -1990,6 +2020,7 @@ PRODUCT_STYLE = {
     "cni_ppz": {"color": "#7f7f7f", "label": "Chennai Extended Radar"},
     "mlr_maxz": {"color": "#bcbd22", "label": "Mangaluru DWR MAXZ - aloft / building"},
     "tvm_maxz": {"color": "#9467bd", "label": "Trivandrum DWR MAXZ - aloft / building"},
+    "tvm_ppi": {"color": "#9467bd", "label": "Trivandrum DWR PPI (2 deg)"},
 }
 
 RADAR_MARKER_LABEL = {"niot": "NIOT X-DWR Chennai", "karaikal": "Karaikal DWR",
