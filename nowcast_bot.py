@@ -778,6 +778,9 @@ PRODUCTS = {
         "min_swatch_rows": 2,
         "despeckle_min_px": 8,
         "min_strong_blob": (36.0, 45),
+        # inner 125 km only: ridge echo over Idukki/Theni/Dindigul caused false
+        # alerts on 11 Oct 2026 even on the 2 deg tilt
+        "max_range_km": 125.0,
     },
 
     "mlr_maxz": {

@@ -103,7 +103,7 @@ import nowcast_bot as nb
 # tvm_maxz (Trivandrum DWR, caz_tvm.gif) added 11 Oct 2026 while Kochi is under
 # maintenance. Its update schedule is erratic compared with the other radars;
 # stale frames are handled by the same age checks as every other product.
-TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "cni_maxz", "cni_ppz", "mlr_maxz")
+TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "cni_maxz", "cni_ppz", "mlr_maxz", "tvm_ppi")
 
 nb.POLLED_PRODUCTS = TEST_PRODUCTS
 nb.ARCHIVE_DIR = Path("archive_500km_test")
