@@ -740,7 +740,11 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
     if tile_url:
         try:
             zoom = 9 if half <= 65 else (8 if half <= 130 else 7)
-            bg, bg_ext, _ = _tile_mosaic(west - 0.05, south - 0.05, east + 0.05, north + 0.05, zoom, tile_url)
+            # Basemap without its own place names: the map draws its own towns, so the two never double up.
+            plain = tile_url.replace("/voyager/", "/voyager_nolabels/")
+            bg, bg_ext, ok_n = _tile_mosaic(west - 0.05, south - 0.05, east + 0.05, north + 0.05, zoom, plain)
+            if ok_n == 0 and plain != tile_url:
+                bg, bg_ext, _ = _tile_mosaic(west - 0.05, south - 0.05, east + 0.05, north + 0.05, zoom, tile_url)
         except Exception:
             bg = None
 
@@ -769,6 +773,7 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
 
     # District boundaries (alerted ones heavier) and the biggest towns of this frame.
     alerted_names = {h.name for h in hits}
+    dist_labels = []
     try:
         dists, _ = _map_features()
         for dname, rings in dists:
@@ -787,19 +792,10 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
             # label spot: middle of the district's part inside the frame (outline vertices clipped to it)
             x, y = float(pts[:, 0].mean()), float(pts[:, 1].mean())
             if (west + 0.08 < x < east - 0.08) and (south + 0.06 < y < north - 0.06):
-                ax.annotate(dname.upper(), (_mx(x), _my(y)), ha="center", va="center", fontsize=8.5, color="#444444",
-                            alpha=0.8, fontweight="bold", zorder=3, path_effects=[pe.withStroke(linewidth=2.5, foreground="white")])
+                dist_labels.append((dname, x, y))
     except Exception as e:
         print(f"[social] district outlines skipped: {e!r}")
-    town_pts = []
-    for tname, tlat, tlon in _frame_towns(south, north, west, east):
-        fx = (tlon - west) / (east - west); fy = (tlat - south) / (north - south)
-        if any(abs(fx - px) < 0.2 and abs(fy - py) < 0.06 for px, py in town_pts):
-            continue
-        town_pts.append((fx, fy))
-        ax.plot([_mx(tlon)], [_my(tlat)], marker="o", ms=5, mfc="#222222", mec="white", mew=1.0, zorder=5)
-        ax.annotate(tname, (_mx(tlon), _my(tlat)), xytext=(5, 4), textcoords="offset points", fontsize=10, color="#111111",
-                    zorder=5, path_effects=[pe.withStroke(linewidth=3, foreground="white")])
+    town_cands = _frame_towns(south, north, west, east)
     if any(h.name == "Chennai" for h in hits):
         t = np.linspace(0, 2 * math.pi, 120)
         ax.plot(_mx(CHENNAI[1] + (CHENNAI_ZONE_KM / (111.0 * math.cos(math.radians(CHENNAI[0])))) * np.cos(t)),
@@ -838,19 +834,56 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
         ax.plot([_mx(a_lon)], [_my(a_lat)], marker=MarkerStyle(tri).rotated(deg=-br), ms=14,
                 mfc="#333333", mec="white", mew=1.4, linestyle="none", zorder=7)
         n_arrows += 1
-    placed = []                      # label centres already drawn, as fractions of the map box
-    for h in hits[:16]:
-        fx = (_mx(h.lon) - _mx(west)) / (_mx(east) - _mx(west))
-        fy = (_my(h.lat) - _my(south)) / (_my(north) - _my(south))
+    # Labels are placed one after another into free space (alerts first, then towns, then
+    # district names); a label that finds no free spot is left out (the post text names it).
+    fig_w, fig_h = 7.2 * 0.94, 7.8 * 0.70          # approx. axes size in inches
+
+    def _fx(lon): return (_mx(lon) - _mx(west)) / (_mx(east) - _mx(west))
+    def _fy(lat): return (_my(lat) - _my(south)) / (_my(north) - _my(south))
+
+    boxes = []
+    def _box_of(cx, cy, text, fs):
+        lines = text.split("\n")
+        w = 0.62 * fs / 72.0 * max(len(l) for l in lines) / fig_w
+        h = 1.35 * fs / 72.0 * len(lines) / fig_h
+        return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+    def _free(b):
+        if b[0] < 0.01 or b[2] > 0.99 or b[1] < 0.01 or b[3] > 0.99:
+            return False
+        return not any(b[0] < o[2] and b[2] > o[0] and b[1] < o[3] and b[3] > o[1] for o in boxes)
+    def _put(fx, fy, text, fs, offsets, **kw):
+        """Try the label at each (dx, dy) offset (axes fractions) from the anchor; True when drawn."""
+        for dx, dy in offsets:
+            cx, cy = fx + dx, fy + dy
+            b = _box_of(cx, cy, text, fs)
+            if _free(b):
+                boxes.append(b)
+                ax.text(cx, cy, text, transform=ax.transAxes, ha="center", va="center", fontsize=fs, zorder=kw.get("z", 6),
+                        fontweight=kw.get("weight", "normal"), color=kw.get("color", "black"), alpha=kw.get("alpha", 1.0),
+                        path_effects=[pe.withStroke(linewidth=kw.get("halo", 3.5), foreground="white")])
+                return True
+        return False
+
+    drawn_dots = []
+    for h in sorted(hits[:16], key=lambda h: (-category(h), h.lead_min)):
+        fx, fy = _fx(h.lon), _fy(h.lat)
         if not (0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0):
             continue                 # outside this panel's view
-        if any(abs(fx - px) < 0.24 and abs(fy - py) < 0.09 for px, py in placed):
-            continue                 # would sit on top of another label; the text of the post still names it
-        placed.append((fx, fy))
         label = (f"{h.name}\n{CATEGORY_NAME[category(h)]}" if h.status == "over"
-                 else f"{h.name}\n{CATEGORY_NAME[category(h)]} ~{fmt_time(h.when_utc)}")
-        ax.annotate(label, (_mx(h.lon), _my(h.lat)), xytext=(0, -22), textcoords="offset points", ha="center", va="top", fontsize=14 if half < 120 else 12,
-                    fontweight="bold", zorder=6, path_effects=halo)
+                 else f"{h.name}\n{CATEGORY_NAME[category(h)]}\n~{fmt_time(h.when_utc)}")
+        fs = 12.5
+        offs = [(0, -0.075), (0, 0.075), (0.2, 0), (-0.2, 0), (0.2, -0.075), (-0.2, -0.075), (0.2, 0.075), (-0.2, 0.075),
+                (0, -0.16), (0, 0.16)]
+        _put(fx, fy, label, fs, offs, weight="bold", z=8, halo=4)
+    for tname, tlat, tlon in town_cands:
+        fx, fy = _fx(tlon), _fy(tlat)
+        if not (0.02 < fx < 0.98 and 0.02 < fy < 0.98):
+            continue
+        n_before = len(boxes)
+        if _put(fx, fy, tname, 10, [(0, 0.03), (0, -0.03), (0.07, 0), (-0.07, 0)], z=5, halo=3):
+            ax.plot([_mx(tlon)], [_my(tlat)], marker="o", ms=5, mfc="#222222", mec="white", mew=1.0, zorder=5)
+    for dname, x, y in dist_labels:
+        _put(_fx(x), _fy(y), dname.upper(), 8.5, [(0, 0), (0, 0.04), (0, -0.04)], weight="bold", color="#555555", alpha=0.85, z=3, halo=2.5)
     ax.set_xlim(_mx(west), _mx(east))
     ax.set_ylim(_my(south), _my(north))
     ax.set_aspect("equal")
