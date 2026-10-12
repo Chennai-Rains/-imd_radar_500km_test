@@ -488,18 +488,22 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
         for cat in (3, 2, 1):
             hs = [h for h in m if category(h) == cat]
             if hs:
-                sents.append(f"{CATEGORY_NAME[cat]} spells of rain over parts of {_districts([h.name for h in hs])}.")
+                sents.append(f"{CATEGORY_NAME[cat]} rains over parts of {_districts([h.name for h in hs])}.")
         for cat in (3, 2, 1):
             hs = [h for h in a if category(h) == cat]
             if hs:
-                sents.append(f"{CATEGORY_NAME[cat]} spells of rain likely to reach parts of "
-                             f"{_districts([h.name for h in hs])} in the coming hours.")
+                lo, hi = min(h.lead_min for h in hs), max(h.lead_min for h in hs)
+                when = f"in about {lo} min" if lo == hi else f"in {lo} to {hi} min"
+                sents.append(f"Rainbands approaching {_districts([h.name for h in hs])}. "
+                             f"{CATEGORY_NAME[cat]} rains likely {when}.")
+        if a:
+            sents.append("Subject to storms retaining current intensity; they may weaken or intensify in real time.")
         b = motion_bearing(exp, m + a) if (m or a) else None
         if b is not None:
-            sents.append(f"Spells roughly moving {compass((b + 180) % 360)} to {compass(b)}.")
+            sents.append(f"Rainbands roughly moving {compass((b + 180) % 360)} to {compass(b)}.")
         if i:
             where = region_of_tn(i[0].lat, i[0].lon)
-            sents.append(f"{'Meanwhile isolated' if sents else 'Isolated'} spells of rain around {_districts([h.name for h in i])} in {where}.")
+            sents.append(f"{'Meanwhile isolated' if sents else 'Isolated'} rains around {_districts([h.name for h in i])} in {where}.")
         listed = m + a + i
         dropped = len(hits_ordered) - len(listed)
         body = " ".join(sents)
@@ -542,9 +546,9 @@ def build_details(listed: list[Hit], all_ordered: list[Hit]) -> str:
     roughly how long it may last). No dBZ or node counts (those stay in the decision log)."""
     now_ = sorted((h for h in listed if h.status == "over"), key=lambda h: (-category(h), -h.nodes))
     soon = sorted((h for h in listed if h.status == "approaching"), key=lambda h: (h.lead_min, -category(h)))
-    lines = [f"- {h.name} Dt.: {CATEGORY_NAME[category(h)]} spell now; {_duration_note(h)}" for h in now_]
-    lines += [f"- {h.name} Dt.: {CATEGORY_NAME[category(h)]} spell in roughly {h.lead_min} min "
-              f"(~{fmt_time(h.when_utc)}); {_duration_note(h)}" for h in soon]
+    lines = [f"- {h.name} Dt.: {CATEGORY_NAME[category(h)]} rains now; {_duration_note(h)}" for h in now_]
+    lines += [f"- {h.name} Dt.: rainbands approaching; {CATEGORY_NAME[category(h)]} rains likely in about {h.lead_min} min "
+              f"(~{fmt_time(h.when_utc)}) if the storm keeps its intensity; {_duration_note(h)}" for h in soon]
     rest = [h.name for h in sorted((h for h in all_ordered if h not in listed),
                                    key=lambda h: (h.status != "over", h.lead_min))]
     if rest:
@@ -891,9 +895,9 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
     for sp in ax.spines.values():
         sp.set_linewidth(1.5)
 
-    where = "Chennai" if all(h.name == "Chennai" for h in hits) else "Tamil Nadu"
+    where = "Chennai" if all(h.name == "Chennai" for h in hits) else "Tamil Nadu and Puducherry"
     fig.suptitle("Experimental Rainfall Nowcast based on IMD Radar", fontsize=15.5, fontweight="bold", y=0.985)
-    ax.set_title(f"{where}: spells of rain\nColours: now {fmt_time(exp.generated_utc)}   Dashed: ~"
+    ax.set_title(f"{where}: rainbands\nColours: now {fmt_time(exp.generated_utc)}   Dashed: ~"
                  f"{fmt_time(exp.generated_utc + timedelta(minutes=lead_then))}"
                  + ("   Arrows: motion" if n_arrows else ""), fontsize=12.5, pad=8)
     cb = fig.colorbar(mesh, ax=ax, orientation="horizontal", fraction=0.045, pad=0.025, ticks=[20, 30, 40, 50])
@@ -1095,7 +1099,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
             print(f"[social] image failed, sending text only: {e!r}")
         ordered = order_hits(a.hits, changed)
         details = build_details(listed, ordered)
-        caption = f"{text}\n\n{details}\n\nExperimental, automated nowcast from IMD radar. Not an official forecast."
+        caption = f"{text}\n\n{details}\n\nExperimental, automated nowcast from IMD radar. Storms may weaken or intensify in real time compared with the forecast. Not an official forecast."
         (drafts / f"{stamp}.txt").write_text(text + "\n")
         _prune_drafts(drafts)
         print(f"[social] DRAFT: {text}")
