@@ -3612,6 +3612,7 @@ BOT_NO_COVERAGE = 255
 # from: its echo, coverage, cells and motion are all kept out of the grid,
 # and it is listed in "radars" with status "excluded".
 BOT_EXCLUDED_PRODUCTS: tuple = ()
+BOT_LONG_RANGE_PRODUCTS: tuple = ("cni_ppz", "kkl_ppz")   # see the cross-check block in export_bot_data()
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -3826,6 +3827,29 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             entry["motion"] = note
             w_sum += w; u_sum += w * u; v_sum += w * v
         radars.append(entry)
+
+    # ---- long-range products defer to the better radar ----
+    # The extended products (Chennai 250-600 km, Karaikal 250-500 km) are coarse, look at higher levels and
+    # read terrain shading as echo at their rim. Wherever a short-range radar that is in use this cycle can
+    # see the same ground, its picture is the one to trust: the extended radar's echo there is dropped (the
+    # node counts as seen by the short-range radar alone). Beyond every short-range radar -- mainly the
+    # west -- the extended products still count. 12 Oct 2026: a false Very heavy alert near Perambalur was
+    # Chennai Extended echo on ground that Karaikal MAXZ (110 km away) showed dry.
+    for p in BOT_LONG_RANGE_PRODUCTS:
+        if p not in regridded:
+            continue
+        covered = np.zeros(lat2d.shape, dtype=bool)
+        for q in regridded:
+            if q in BOT_LONG_RANGE_PRODUCTS or q == p:
+                continue
+            site = site_for(q)
+            reach = min(PRODUCTS[q]["range_km"], PRODUCTS[q].get("max_range_km") or 1e9)
+            dist = np.hypot((lat2d - site["site_lat"]) * 111.0,
+                            (lon2d - site["site_lon"]) * 111.0 * np.cos(np.radians(site["site_lat"])))
+            covered |= dist <= reach
+        if covered.any():
+            regridded[p] = np.where(covered, np.nan, regridded[p])
+            print(f"[bot-export] {p}: {int(covered.sum())} nodes left to the short-range radars")
 
     if not regridded:
         print("[bot-export] no usable radar this cycle -- writing an index that says so, no grid")
