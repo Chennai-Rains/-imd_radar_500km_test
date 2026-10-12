@@ -646,20 +646,80 @@ def split_views(hits: list[Hit], max_views: int = MAX_IMAGES) -> list[list[Hit]]
     return sorted(groups.values(), key=lambda g: -max(h.max_dbz for h in g))
 
 
+GRID_KM = 100.0                       # fixed map cells: the state is cut into 100 x 100 km squares
+GRID_LAT0, GRID_LON0 = 8.0, 76.2      # south-west corner of the grid (covers all of Tamil Nadu)
+GRID_REF_LAT = 10.8                   # latitude at which a cell is 100 km wide; cells are lat/lon aligned
+CELL_PAD_KM = 10.0                    # frame = cell + this margin, so echo on a cell edge is not cut off
+MAP_TOWNS_MAX = 7
+_GRID_DLAT = GRID_KM / 111.195
+_GRID_DLON = GRID_KM / (111.195 * math.cos(math.radians(GRID_REF_LAT)))
+
+
+def grid_cell(lat: float, lon: float) -> tuple[int, int]:
+    return int(math.floor((lat - GRID_LAT0) / _GRID_DLAT)), int(math.floor((lon - GRID_LON0) / _GRID_DLON))
+
+
+def cell_bounds(cell: tuple[int, int]) -> tuple[float, float, float, float]:
+    """(south, north, west, east) of the cell, including the margin."""
+    i, j = cell
+    pad_lat = CELL_PAD_KM / 111.195
+    pad_lon = CELL_PAD_KM / (111.195 * math.cos(math.radians(GRID_REF_LAT)))
+    return (GRID_LAT0 + i * _GRID_DLAT - pad_lat, GRID_LAT0 + (i + 1) * _GRID_DLAT + pad_lat,
+            GRID_LON0 + j * _GRID_DLON - pad_lon, GRID_LON0 + (j + 1) * _GRID_DLON + pad_lon)
+
+
+def split_cells(hits: list[Hit], max_views: int = MAX_IMAGES) -> list[tuple[tuple[int, int], list[Hit]]]:
+    """One picture per grid cell that holds an alerted region's echo, strongest first.
+    The same cell always gets the same frame, so readers learn the maps."""
+    groups: dict[tuple[int, int], list[Hit]] = {}
+    for h in hits:
+        groups.setdefault(grid_cell(h.lat, h.lon), []).append(h)
+    ordered = sorted(groups.items(), key=lambda kv: (-max(category(h) for h in kv[1]), -max(h.max_dbz for h in kv[1])))
+    return ordered[:max_views]
+
+
 def render_images(exp: Export, hits: list[Hit], base_path: Path, tile_url: str | None = None) -> list[Path]:
-    """One zoomed map per spatial group of regions (see split_views). Each shows
-    every echo and arrow inside its own view; names only the regions in it."""
+    """One fixed 100 km grid-cell map per cell holding alerted echo (see split_cells)."""
     base_path = Path(base_path)
-    views = split_views(hits)
+    views = split_cells(hits)
     out = []
-    for i, grp in enumerate(views, 1):
+    for i, (cell, grp) in enumerate(views, 1):
         path = base_path.with_name(f"{base_path.stem}_{i}{base_path.suffix}") if len(views) > 1 else base_path
-        out.append(render_image(exp, hits, path, tile_url, view_hits=grp))
+        out.append(render_image(exp, hits, path, tile_url, view_hits=grp, cell=cell))
     return out
 
 
+_MAP_FEATURES = {}
+
+
+def _map_features():
+    """District outer rings (lon/lat arrays) and towns, loaded once."""
+    if not _MAP_FEATURES:
+        gj = json.loads(TN_GEOJSON.read_text()) if TN_GEOJSON.exists() else {"features": []}
+        dists = []
+        for f in gj["features"]:
+            g = f["geometry"]
+            polys = [g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"]
+            name = RENAME.get(f["properties"]["district"], f["properties"]["district"])
+            dists.append((name, [np.asarray(p[0], dtype=float) for p in polys]))
+        _MAP_FEATURES["districts"] = dists
+        _MAP_FEATURES["towns"] = json.loads(TN_PLACES.read_text()) if TN_PLACES.exists() else []
+    return _MAP_FEATURES["districts"], _MAP_FEATURES["towns"]
+
+
+def _frame_towns(south, north, west, east, limit=MAP_TOWNS_MAX):
+    """The biggest towns inside the frame: cities first, then district headquarters, then the rest."""
+    _, towns = _map_features()
+    inside = [p for p in towns if south + 0.03 < p["lat"] < north - 0.03 and west + 0.04 < p["lon"] < east - 0.04]
+    def rank(p):
+        name = PLACE_RENAME.get(p["name"], p["name"])
+        hq = RENAME.get(p.get("district", ""), p.get("district", "")) == name
+        return (0 if p["kind"] == "city" else (1 if hq else 2), p["name"])
+    return [(PLACE_RENAME.get(p["name"], p["name"]), p["lat"], p["lon"]) for p in sorted(inside, key=rank)][:limit]
+
+
 def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None = None,
-                 view_hits: list[Hit] | None = None) -> Path:
+                 view_hits: list[Hit] | None = None, cell: tuple[int, int] | None = None) -> Path:
     """One large square map, readable on a phone: filled colours are the echo
     now, the dashed outline is where strong echo is expected at the horizon,
     and each listed region is named where its echo is."""
@@ -670,15 +730,16 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
     from matplotlib.colors import BoundaryNorm, ListedColormap
 
     names = {n: i for i, n in enumerate(exp.layer_names)}
-    clat, clon, half = view_box(exp, view_hits or hits, names)
-    dlat = half / 111.0
-    dlon = half / (111.0 * math.cos(math.radians(clat)))
-    west, east, south, north = clon - dlon, clon + dlon, clat - dlat, clat + dlat
+    if cell is None:
+        cell = grid_cell(*(((view_hits or hits)[0].lat), ((view_hits or hits)[0].lon)))
+    south, north, west, east = cell_bounds(cell)
+    clat, clon = (south + north) / 2, (west + east) / 2
+    half = GRID_KM / 2 + CELL_PAD_KM
 
     bg, bg_ext = None, None
     if tile_url:
         try:
-            zoom = 9 if half <= 55 else (8 if half <= 130 else 7)
+            zoom = 9 if half <= 65 else (8 if half <= 130 else 7)
             bg, bg_ext, _ = _tile_mosaic(west - 0.05, south - 0.05, east + 0.05, north + 0.05, zoom, tile_url)
         except Exception:
             bg = None
@@ -706,6 +767,39 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
         if strong.any():
             ax.contour(X, Y, strong, levels=[0.5], colors="black", linewidths=1.6, linestyles="--", zorder=4)
 
+    # District boundaries (alerted ones heavier) and the biggest towns of this frame.
+    alerted_names = {h.name for h in hits}
+    try:
+        dists, _ = _map_features()
+        for dname, rings in dists:
+            hot = dname in alerted_names
+            inside = []
+            for r in rings:
+                if r[:, 0].max() < west or r[:, 0].min() > east or r[:, 1].max() < south or r[:, 1].min() > north:
+                    continue
+                ax.plot(_mx(r[:, 0]), _my(r[:, 1]), color="#1a1a1a" if hot else "#555555",
+                        lw=2.0 if hot else 1.0, alpha=0.9 if hot else 0.75, zorder=3)
+                m = (r[:, 0] > west) & (r[:, 0] < east) & (r[:, 1] > south) & (r[:, 1] < north)
+                inside.append(r[m])
+            pts = np.concatenate(inside) if inside else np.zeros((0, 2))
+            if hot or len(pts) < 6:
+                continue
+            # label spot: middle of the district's part inside the frame (outline vertices clipped to it)
+            x, y = float(pts[:, 0].mean()), float(pts[:, 1].mean())
+            if (west + 0.08 < x < east - 0.08) and (south + 0.06 < y < north - 0.06):
+                ax.annotate(dname.upper(), (_mx(x), _my(y)), ha="center", va="center", fontsize=8.5, color="#444444",
+                            alpha=0.8, fontweight="bold", zorder=3, path_effects=[pe.withStroke(linewidth=2.5, foreground="white")])
+    except Exception as e:
+        print(f"[social] district outlines skipped: {e!r}")
+    town_pts = []
+    for tname, tlat, tlon in _frame_towns(south, north, west, east):
+        fx = (tlon - west) / (east - west); fy = (tlat - south) / (north - south)
+        if any(abs(fx - px) < 0.2 and abs(fy - py) < 0.06 for px, py in town_pts):
+            continue
+        town_pts.append((fx, fy))
+        ax.plot([_mx(tlon)], [_my(tlat)], marker="o", ms=5, mfc="#222222", mec="white", mew=1.0, zorder=5)
+        ax.annotate(tname, (_mx(tlon), _my(tlat)), xytext=(5, 4), textcoords="offset points", fontsize=10, color="#111111",
+                    zorder=5, path_effects=[pe.withStroke(linewidth=3, foreground="white")])
     if any(h.name == "Chennai" for h in hits):
         t = np.linspace(0, 2 * math.pi, 120)
         ax.plot(_mx(CHENNAI[1] + (CHENNAI_ZONE_KM / (111.0 * math.cos(math.radians(CHENNAI[0])))) * np.cos(t)),
