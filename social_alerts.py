@@ -275,7 +275,7 @@ class Assessment:
     n_regions: int = 0
 
 
-OFFSHORE_MAX_KM = 50.0     # a band that is still over the sea is only announced once it is this close to the district
+OFFSHORE_MAX_KM = 25.0     # a band that is still over the sea is only announced once it is this close to the district
 LAND_NEAR_KM = 150.0       # ...while echo already over land is announced from further away
 _LAND_CACHE: dict = {}
 
