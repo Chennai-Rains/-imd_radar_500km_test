@@ -614,7 +614,14 @@ PRODUCTS = {
         # kkl_ppz above for the full reasoning. Labeled "Chennai Extended
         # Radar" on the page (PRODUCT_STYLE), same naming pattern as
         # Karaikal's masked product.
-        "mask_within_km": 250.0,
+        # Terrain shading in this frame decodes as 35-58 dBZ echo when the dithered colour bar happens to give the
+        # LUT the brown relief colours (about 11,900 px, Western Ghats / Karnataka -- in the frames where it
+        # happens, and once the km_per_px error is fixed they are no longer hidden by accident). Two guards:
+        # the relief's own colours are excluded from the LUT (exclude_colors below), and static_exclude_mask holds
+        # every pixel that read as echo in >= 25 % of 24 frames spread over 30 Sep - 12 Oct, grown 2 px for the dither.
+        "static_exclude_mask": "masks/cni_ppz_static_exclude.png",
+        "exclude_colors": None,   # filled in just below
+                "mask_within_km": 250.0,
         # Same open-water texture-collision risk as cni_maxz (same vendor
         # software/palette, same symptom expected) -- starting from
         # cni_maxz's own measured exclude_colors/despeckle_min_px as a
@@ -634,6 +641,8 @@ PRODUCTS = {
         "exclude_colors": [
             (102, 204, 255), (153, 204, 255), (102, 153, 255), (153, 153, 255),
             (102, 153, 204), (102, 204, 204), (153, 153, 204), (153, 204, 204),
+            # the relief's own colours (12 Oct 2026): ~11,900 px of Western Ghats / Karnataka terrain
+            (204, 153, 51), (204, 102, 51), (102, 51, 51), (204, 204, 51), (153, 51, 51),
         ],
         "label_exclude_boxes": [
             (705, 685, 799, 800),   # national emblem/seal, bottom-right of the plot panel
