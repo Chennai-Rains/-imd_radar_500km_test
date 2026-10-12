@@ -11,6 +11,10 @@ on:
         description: "Also send one made-up test draft to Telegram (checks the link, no real weather)"
         type: boolean
         default: false
+      send_alert_now:
+        description: "Manual trigger: post the rain spells active right now, ignoring quiet hours (11 PM-4 AM), gaps and 'already alerted'"
+        type: boolean
+        default: false
 
 # Only one run at a time, same reasoning as the live repo: cheap insurance
 # against two runs racing to commit/push state_500km_test/archive_500km_test
@@ -56,6 +60,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           SOCIAL_TEST_DRAFT: ${{ inputs.send_test_draft }}
+          SOCIAL_FORCE_ALERT: ${{ inputs.send_alert_now }}
         run: python test_500km_pipeline.py
 
       - name: Rebase onto latest main before committing

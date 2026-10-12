@@ -58,6 +58,10 @@ CHENNAI_ZONE_KM = 40.0     # "Chennai": city + immediate suburbs (the old single
 CORE_DBZ = 45.0            # core of a storm, for the Intense category
 ALERT_DBZ = 35.0           # grid node counts as strong echo at/above this
 MIN_REGION_NODES = 8       # grid step is ~2.2 km (~5 km2/node): ~40 km2 of strong echo. 6 nodes on an edge was a real false alarm (5 Oct)
+PERSIST_NODES = 6          # a smaller cell (6-7 strong nodes, ~30 km2) counts only when the district also had >= this many in the previous cycle
+PERSIST_MAX_AGE_MIN = 15   # ...and that previous cycle must be this recent (cycles are ~5 min apart)
+QUIET_START_HOUR, QUIET_END_HOUR = 23, 4   # IST: from 23:00 to 03:59 only Very heavy spells are announced (a manual trigger overrides)
+QUIET_MIN_CATEGORY = 3
 MAX_LEAD_MIN = 90          # the export carries layers out to +90 min
 
 # Names as the audience writes them (the boundary file uses other spellings).
@@ -160,6 +164,10 @@ class Region:
     cs: slice
     sub: np.ndarray            # bool mask inside that box
     n: int                     # nodes in the region
+
+    @property
+    def min_nodes_persist(self) -> int:
+        return max(3, min(PERSIST_NODES, int(0.25 * self.n)))
 
     @property
     def min_nodes(self) -> int:
@@ -273,6 +281,8 @@ class Assessment:
     uncovered: list = field(default_factory=list)
     offshore: list = field(default_factory=list)   # approaching hits dropped: only an offshore band, farther than OFFSHORE_MAX_KM
     n_regions: int = 0
+    weak: list = field(default_factory=list)       # districts with >= PERSIST_NODES strong nodes at some lead (for next cycle's persistence test)
+    persisted: list = field(default_factory=list)  # hits that exist only because the same small cell was also seen last cycle
 
 
 OFFSHORE_MAX_KM = 25.0     # a band that is still over the sea is only announced once it is this close to the district
@@ -329,7 +339,7 @@ def _offshore_only(exp: Export, reg: Region, idx0: int) -> bool:
     return not (d_land <= LAND_NEAR_KM or d_sea <= OFFSHORE_MAX_KM)
 
 
-def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) -> Assessment:
+def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, prev_weak: set | None = None) -> Assessment:
     doc = exp.doc
     age = (now_utc - exp.generated_utc).total_seconds() / 60.0
     if age > MAX_EXPORT_AGE_MIN:
@@ -353,18 +363,23 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) 
         idx = [(0, exp.layer_names.index("observed"))]
     idx.sort()
 
-    hits, uncovered, offshore = [], [], []
+    hits, uncovered, offshore, weak, persisted = [], [], [], [], []
+    prev_weak = prev_weak or set()
     for reg in regions:
         first_layer = exp.grid[idx[0][1]][reg.rs, reg.cs][reg.sub]
         if (first_layer != 255).mean() < MIN_REGION_COVERAGE:
             uncovered.append(reg.name)
             continue
         first, nodes_first, max_dbz, cen, core, last = None, 0, 0.0, None, 0, 0
+        thr = reg.min_nodes_persist if reg.name in prev_weak else reg.min_nodes   # small cells need to have been seen last cycle too
+        seen_weak = False
         for lead, i in idx:
             v = exp.grid[i][reg.rs, reg.cs]
             strong = (v >= ALERT_DBZ) & (v < 255) & reg.sub
             n = int(strong.sum())
-            if n >= reg.min_nodes:
+            if n >= reg.min_nodes_persist:
+                seen_weak = True
+            if n >= thr:
                 last = lead
                 if first is None:
                     first, nodes_first = lead, n
@@ -372,13 +387,17 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) 
                     cen = (float(exp.lats[reg.rs][ys].mean()), float(exp.lons[reg.cs][xs].mean()))
                 max_dbz = max(max_dbz, float(v[strong].max()))
                 core = max(core, int(((v >= CORE_DBZ) & (v < 255) & reg.sub).sum()))
+        if seen_weak:
+            weak.append(reg.name)
         if first is not None and first > 0 and _offshore_only(exp, reg, idx[0][1]):
             offshore.append(reg.name)
             continue
         if first is not None:
+            if nodes_first < reg.min_nodes:
+                persisted.append(reg.name)
             hits.append(Hit(reg.name, "over" if first == 0 else "approaching", first, max_dbz, nodes_first,
                             exp.generated_utc + timedelta(minutes=first), cen[0], cen[1], core, last))
-    return Assessment(True, "ok", hits, uncovered, offshore, len(regions))
+    return Assessment(True, "ok", hits, uncovered, offshore, len(regions), weak, persisted)
 
 
 # --- episode / dedup state ---------------------------------------------------------
@@ -390,6 +409,11 @@ def load_state(path: Path) -> dict:
     except Exception:
         pass
     return {"regions": {}, "last_post_utc": None, "posts": {}}
+
+
+def in_quiet_hours(now_utc: datetime) -> bool:
+    h = now_utc.astimezone(IST).hour
+    return h >= QUIET_START_HOUR or h < QUIET_END_HOUR
 
 
 def _dt(s):
@@ -1117,8 +1141,10 @@ def _prune_drafts(folder: Path) -> None:
 
 
 def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
-        sender=send_telegram, tile_url: str | None = None) -> dict:
-    """One cycle. Returns what it decided (also appended to decision_log.jsonl)."""
+        sender=send_telegram, tile_url: str | None = None, force: bool = False) -> dict:
+    """One cycle. Returns what it decided (also appended to decision_log.jsonl).
+    force=True is the manual trigger: post what is active right now, ignoring the quiet
+    hours, the minimum gaps and 'already alerted'."""
     now_utc = now_utc or datetime.now(timezone.utc)
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -1130,10 +1156,26 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         err = "export has no grid this cycle"
     except Exception as e:
         exp, err = None, f"could not read the export: {e!r}"
-    a = assess(exp, now_utc) if exp is not None else Assessment(False, err)
+    ws = state.get("weak_seen") or {}
+    prev_weak = set(ws.get("names", [])) if _mins(now_utc, _dt(ws.get("t"))) <= PERSIST_MAX_AGE_MIN else set()
+    a = assess(exp, now_utc, prev_weak=prev_weak) if exp is not None else Assessment(False, err)
+    if a.ok:
+        state["weak_seen"] = {"t": now_utc.isoformat(), "names": a.weak}
+
+    quiet_held = []
+    if a.ok and not force and in_quiet_hours(now_utc):
+        quiet_held = [h.name for h in a.hits if category(h) < QUIET_MIN_CATEGORY]
+        a.hits = [h for h in a.hits if category(h) >= QUIET_MIN_CATEGORY]
 
     if not a.ok:
         action, reason, changed = "skip", a.reason, set()
+    elif force:
+        action, reason, changed = (("send", "manual trigger", {h.name for h in a.hits}) if a.hits
+                                   else ("skip", "manual trigger: nothing active right now", set()))
+        regs0 = state.setdefault("regions", {})
+        for h in a.hits:
+            regs0.setdefault(h.name, {"active": False, "last_post": None, "last_status": None, "last_rank": 0})
+            regs0[h.name]["last_hit"] = now_utc.isoformat()
     else:
         action, reason, changed = decide(a.hits, state, now_utc)
 
@@ -1144,6 +1186,12 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
              "hits": {h.name: [h.status[0], h.max_dbz, h.core45, h.nodes] for h in a.hits}}   # status, peak dBZ, core nodes, strong nodes
     if a.uncovered:
         entry["no_coverage"] = len(a.uncovered)
+    if quiet_held:
+        entry["quiet_held"] = quiet_held       # 23:00-03:59 IST: below Very heavy, not announced
+    if a.persisted:
+        entry["persisted_small"] = a.persisted  # 6-7 node cells accepted because they were also seen last cycle
+    if force:
+        entry["manual"] = True
     if a.offshore:
         entry["offshore_held"] = a.offshore   # approaching, but the band is still over the sea and beyond OFFSHORE_MAX_KM
 

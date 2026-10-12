@@ -144,6 +144,7 @@ try:
         # prove the Telegram link works, independent of real weather.
         social_alerts.send_test_draft(tile_url=getattr(nb, "CARTO_VOYAGER_URL", None))
     social_alerts.run(nb.OUTPUT_BOT_JSON, nb.OUTPUT_BOT_GRID, Path("state_social_test"),
-                      tile_url=getattr(nb, "CARTO_VOYAGER_URL", None))
+                      tile_url=getattr(nb, "CARTO_VOYAGER_URL", None),
+                      force=os.environ.get("SOCIAL_FORCE_ALERT") == "true")
 except Exception as e:
     print(f"[social] failed (the map and tracking above are unaffected): {e!r}")
