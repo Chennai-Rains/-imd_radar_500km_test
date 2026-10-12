@@ -596,7 +596,12 @@ PRODUCTS = {
         # by coastline/labels right at the site) crosshair marker and landed
         # within a few px, consistent with each other.
         "site_px": (392.6, 395.3),
-        "km_per_px": 1.500,        # frame's own metadata prints "Resolution: 1.500 km/pixel" -- confirmed independently via the gridline fit on both axes (within ~1.5%)
+        # Despite the key's name this is PIXELS PER KM like every other product here: the frame's metadata
+        # says "Resolution: 1.500 km/pixel", i.e. 1/1.5 px per km. It was entered as 1.5, which put every
+        # echo 2.25x too close to Chennai and made the 250 km inner mask swallow the whole image except its
+        # outer rim -- terrain shading from the 600 km rim (Western Ghats) then decoded as 58 dBZ echo and
+        # showed up near Perambalur: the false "Very heavy" alert of 12 Oct 2026, 10:32 AM.
+        "km_per_px": 1.0 / 1.5,
         "colorbar_bbox": (820, 74, 884, 525),
         "value_at_top": 60.0,      # same uniform 2.5dB/band MAX(dBZ) scale as every other product here
         "value_at_bottom": 20.0,

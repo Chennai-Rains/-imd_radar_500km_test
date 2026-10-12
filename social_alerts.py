@@ -271,6 +271,7 @@ class Hit:
     lon: float
     core45: int = 0            # most nodes at/above CORE_DBZ at any lead (a real core, not one spike)
     end_lead: int = 0          # last lead (min) at which the region still holds strong echo
+    vh_ok: bool = True         # Very heavy allowed: seen as intense in the previous cycle too, and not a small (< min_nodes) cell
 
 
 @dataclass
@@ -282,6 +283,7 @@ class Assessment:
     offshore: list = field(default_factory=list)   # approaching hits dropped: only an offshore band, farther than OFFSHORE_MAX_KM
     n_regions: int = 0
     weak: list = field(default_factory=list)       # districts with >= PERSIST_NODES strong nodes at some lead (for next cycle's persistence test)
+    intense: list = field(default_factory=list)    # districts that look Very heavy this cycle (confirmed or not), for next cycle's confirmation
     persisted: list = field(default_factory=list)  # hits that exist only because the same small cell was also seen last cycle
 
 
@@ -339,7 +341,7 @@ def _offshore_only(exp: Export, reg: Region, idx0: int) -> bool:
     return not (d_land <= LAND_NEAR_KM or d_sea <= OFFSHORE_MAX_KM)
 
 
-def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, prev_weak: set | None = None) -> Assessment:
+def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, prev_weak: set | None = None, prev_vh: set | None = None) -> Assessment:
     doc = exp.doc
     age = (now_utc - exp.generated_utc).total_seconds() / 60.0
     if age > MAX_EXPORT_AGE_MIN:
@@ -363,7 +365,7 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, 
         idx = [(0, exp.layer_names.index("observed"))]
     idx.sort()
 
-    hits, uncovered, offshore, weak, persisted = [], [], [], [], []
+    hits, uncovered, offshore, weak, persisted, intense = [], [], [], [], [], []
     prev_weak = prev_weak or set()
     for reg in regions:
         first_layer = exp.grid[idx[0][1]][reg.rs, reg.cs][reg.sub]
@@ -395,9 +397,16 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, 
         if first is not None:
             if nodes_first < reg.min_nodes:
                 persisted.append(reg.name)
-            hits.append(Hit(reg.name, "over" if first == 0 else "approaching", first, max_dbz, nodes_first,
-                            exp.generated_utc + timedelta(minutes=first), cen[0], cen[1], core, last))
-    return Assessment(True, "ok", hits, uncovered, offshore, len(regions), weak, persisted)
+            h = Hit(reg.name, "over" if first == 0 else "approaching", first, max_dbz, nodes_first,
+                    exp.generated_utc + timedelta(minutes=first), cen[0], cen[1], core, last)
+            if is_intense(h):
+                intense.append(reg.name)
+                # Very heavy is the claim we must not get wrong: the district has to have looked Very heavy in
+                # the previous cycle too (a one-frame artefact does not repeat), and the cell has to be a full
+                # size one, not a 6-7 node cell let in by the small-cell rule.
+                h.vh_ok = nodes_first >= reg.min_nodes and (prev_vh is None or reg.name in prev_vh)
+            hits.append(h)
+    return Assessment(True, "ok", hits, uncovered, offshore, len(regions), weak, intense, persisted)
 
 
 # --- episode / dedup state ---------------------------------------------------------
@@ -543,7 +552,7 @@ CATEGORY_NAME = {1: "Moderate", 2: "Heavy", 3: "Very heavy"}
 
 def category(h: Hit) -> int:
     """1 Moderate, 2 Heavy, 3 Very heavy spell of rain."""
-    if is_intense(h):
+    if is_intense(h) and h.vh_ok:
         return 3
     if h.max_dbz >= HEAVY_DBZ and h.core45 >= HEAVY_CORE_NODES:
         return 2
@@ -1158,9 +1167,12 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         exp, err = None, f"could not read the export: {e!r}"
     ws = state.get("weak_seen") or {}
     prev_weak = set(ws.get("names", [])) if _mins(now_utc, _dt(ws.get("t"))) <= PERSIST_MAX_AGE_MIN else set()
-    a = assess(exp, now_utc, prev_weak=prev_weak) if exp is not None else Assessment(False, err)
+    vs = state.get("vh_seen") or {}
+    prev_vh = set(vs.get("names", [])) if _mins(now_utc, _dt(vs.get("t"))) <= PERSIST_MAX_AGE_MIN else set()
+    a = assess(exp, now_utc, prev_weak=prev_weak, prev_vh=prev_vh) if exp is not None else Assessment(False, err)
     if a.ok:
         state["weak_seen"] = {"t": now_utc.isoformat(), "names": a.weak}
+        state["vh_seen"] = {"t": now_utc.isoformat(), "names": a.intense}
 
     quiet_held = []
     if a.ok and not force and in_quiet_hours(now_utc):
@@ -1188,6 +1200,9 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         entry["no_coverage"] = len(a.uncovered)
     if quiet_held:
         entry["quiet_held"] = quiet_held       # 23:00-03:59 IST: below Very heavy, not announced
+    unconf = [h.name for h in a.hits if is_intense(h) and not h.vh_ok]
+    if unconf:
+        entry["vh_unconfirmed"] = unconf        # looked Very heavy but not yet confirmed (second cycle / full-size cell): announced as Heavy at most
     if a.persisted:
         entry["persisted_small"] = a.persisted  # 6-7 node cells accepted because they were also seen last cycle
     if force:
