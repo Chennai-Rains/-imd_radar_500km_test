@@ -262,6 +262,7 @@ class Hit:
     lat: float                 # centre of the strong echo in the region at that lead
     lon: float
     core45: int = 0            # most nodes at/above CORE_DBZ at any lead (a real core, not one spike)
+    end_lead: int = 0          # last lead (min) at which the region still holds strong echo
 
 
 @dataclass
@@ -303,12 +304,13 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) 
         if (first_layer != 255).mean() < MIN_REGION_COVERAGE:
             uncovered.append(reg.name)
             continue
-        first, nodes_first, max_dbz, cen, core = None, 0, 0.0, None, 0
+        first, nodes_first, max_dbz, cen, core, last = None, 0, 0.0, None, 0, 0
         for lead, i in idx:
             v = exp.grid[i][reg.rs, reg.cs]
             strong = (v >= ALERT_DBZ) & (v < 255) & reg.sub
             n = int(strong.sum())
             if n >= reg.min_nodes:
+                last = lead
                 if first is None:
                     first, nodes_first = lead, n
                     ys, xs = np.where(strong)
@@ -317,7 +319,7 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) 
                 core = max(core, int(((v >= CORE_DBZ) & (v < 255) & reg.sub).sum()))
         if first is not None:
             hits.append(Hit(reg.name, "over" if first == 0 else "approaching", first, max_dbz, nodes_first,
-                            exp.generated_utc + timedelta(minutes=first), cen[0], cen[1], core))
+                            exp.generated_utc + timedelta(minutes=first), cen[0], cen[1], core, last))
     return Assessment(True, "ok", hits, uncovered, len(regions))
 
 
@@ -363,7 +365,7 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime) -> tuple[str, str, s
         st = regs[h.name]
         if not st.get("active"):
             new.append(h.name); changed.add(h.name); continue
-        rank = 2 if is_intense(h) else 1     # Thunderstorms -> Intense thunderstorms counts as an upgrade
+        rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
         went_over = h.status == "over" and st.get("last_status") == "approaching"
         if (went_over or rank > st.get("last_rank", 0)) and _mins(now_utc, _dt(st.get("last_post"))) >= MIN_GAP_MIN:
             upgraded.append(h.name); changed.add(h.name)
@@ -435,7 +437,7 @@ def _districts(names: list[str]) -> str:
     return f"{_join(names)} district" + ("" if len(names) == 1 else "s")
 
 
-# "Intense thunderstorms": peak at/above INTENSE_DBZ AND a real core (INTENSE_CORE_NODES nodes at/above
+# "Very heavy spells": peak at/above INTENSE_DBZ AND a real core (INTENSE_CORE_NODES nodes at/above
 # CORE_DBZ, about 15 km2), so one stray bright node does not promote a district. Set from a replay of 64
 # alert cycles (6-10 Oct 2026, 226 district-hits): about 1 in 5 hits is Intense, in about 4 of 10 cycles.
 INTENSE_DBZ = 48.0
@@ -445,12 +447,29 @@ ISOLATED_MIN_KM = 80.0
 
 
 def is_intense(h: Hit) -> bool:
-    """Two categories only: "Thunderstorms" and "Intense thunderstorms" (see INTENSE_DBZ)."""
+    """Very heavy spell: peak at/above INTENSE_DBZ with a real core (see INTENSE_DBZ)."""
     return h.max_dbz >= INTENSE_DBZ and h.core45 >= INTENSE_CORE_NODES
 
 
+# "Spells of rain" in three categories from radar intensity (12 Oct 2026). Rough rain rates from the
+# standard Z = 200 R^1.6: 35 dBZ ~ 6 mm/h, 45 dBZ ~ 24 mm/h, 48 dBZ ~ 37 mm/h. Across 281 alert cycles
+# (6-12 Oct, 817 district-hits) this splits about 64% Moderate, 28% Heavy, 9% Very heavy.
+HEAVY_DBZ = 45.0
+HEAVY_CORE_NODES = 2       # nodes at/above HEAVY_DBZ, so one bright node does not make a spell Heavy
+CATEGORY_NAME = {1: "Moderate", 2: "Heavy", 3: "Very heavy"}
+
+
+def category(h: Hit) -> int:
+    """1 Moderate, 2 Heavy, 3 Very heavy spell of rain."""
+    if is_intense(h):
+        return 3
+    if h.max_dbz >= HEAVY_DBZ and h.core45 >= HEAVY_CORE_NODES:
+        return 2
+    return 1
+
+
 def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
-    """Written like the blog's own thunderstorm tweets: where it is intense now, which way
+    """Rain-spell wording (Moderate/Heavy/Very heavy): where it is intense now, which way
     it is moving and where it may go next, then any isolated storms elsewhere. Returns the
     text and the hits it names; the others become "+N more districts"."""
     asof = fmt_time(exp.generated_utc)
@@ -466,29 +485,27 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
     def compose(n_main: int, n_appr: int, n_iso: int) -> tuple[str, list[Hit]]:
         m, a, i = main[:n_main], appr_all[:n_appr], iso[:n_iso]
         sents = []
-        m_int, m_norm = [h for h in m if is_intense(h)], [h for h in m if not is_intense(h)]
-        if m_int:
-            sents.append(f"Intense thunderstorms over parts of {_districts([h.name for h in m_int])}.")
-        if m_norm:
-            sents.append(f"Thunderstorms over parts of {_districts([h.name for h in m_norm])}.")
-        if a:
-            b = motion_bearing(exp, m + a)
-            tgt = f"parts of {_districts([h.name for h in a])}"
-            if m:
-                mv = (f"Storms roughly moving {compass((b + 180) % 360)} to {compass(b)}, so they are likely to move into"
-                      if b is not None else "Storms are likely to move into")
-                sents.append(f"{mv} {tgt} in the coming hours.")
-            else:
-                sents.append(f"Thunderstorms are likely to move into {tgt} in the coming hours.")
+        for cat in (3, 2, 1):
+            hs = [h for h in m if category(h) == cat]
+            if hs:
+                sents.append(f"{CATEGORY_NAME[cat]} spells of rain over parts of {_districts([h.name for h in hs])}.")
+        for cat in (3, 2, 1):
+            hs = [h for h in a if category(h) == cat]
+            if hs:
+                sents.append(f"{CATEGORY_NAME[cat]} spells of rain likely to reach parts of "
+                             f"{_districts([h.name for h in hs])} in the coming hours.")
+        b = motion_bearing(exp, m + a) if (m or a) else None
+        if b is not None:
+            sents.append(f"Spells roughly moving {compass((b + 180) % 360)} to {compass(b)}.")
         if i:
             where = region_of_tn(i[0].lat, i[0].lon)
-            sents.append(f"{'Meanwhile isolated' if sents else 'Isolated'} storms around {_districts([h.name for h in i])} in {where}.")
+            sents.append(f"{'Meanwhile isolated' if sents else 'Isolated'} spells of rain around {_districts([h.name for h in i])} in {where}.")
         listed = m + a + i
         dropped = len(hits_ordered) - len(listed)
         body = " ".join(sents)
         if dropped:
             body += f" (+{dropped} more districts)"
-        return f"COMK Automated Radar Nowcast ({asof} IST): {body} {HASHTAGS}", listed
+        return f"COMK Automated Rainfall Nowcast ({asof} IST): {body} {HASHTAGS}", listed
 
     n_m, n_a, n_i = min(len(main), MAX_NAMED_REGIONS), min(len(appr_all), 4), min(len(iso), 2)
     while True:
@@ -511,13 +528,23 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
             n_a -= 1
 
 
+def _duration_note(h: Hit) -> str:
+    """Rough 'may last' from how long the moved-forward layers keep strong echo in the district."""
+    horizon = max(MAX_LEAD_MIN, 1)
+    if h.end_lead >= horizon:
+        return f"likely to continue through the next {horizon} min"
+    dur = h.end_lead - h.lead_min + 10
+    return f"may last about {max(dur, 10)} min"
+
+
 def build_details(listed: list[Hit], all_ordered: list[Hit]) -> str:
-    """Plain-language list under the headline: where it is now, where it is heading and
-    in roughly how many minutes. No dBZ or node counts (those stay in the decision log)."""
-    now_ = [h for h in listed if h.status == "over"]
-    soon = sorted((h for h in listed if h.status == "approaching"), key=lambda h: h.lead_min)
-    lines = [f"- {h.name} Dt.: Now impacting" for h in now_]
-    lines += [f"- {h.name} Dt.: In roughly {h.lead_min} minutes" for h in soon]
+    """Per district: the category of the spell and the estimated timeline (when it starts and
+    roughly how long it may last). No dBZ or node counts (those stay in the decision log)."""
+    now_ = sorted((h for h in listed if h.status == "over"), key=lambda h: (-category(h), -h.nodes))
+    soon = sorted((h for h in listed if h.status == "approaching"), key=lambda h: (h.lead_min, -category(h)))
+    lines = [f"- {h.name} Dt.: {CATEGORY_NAME[category(h)]} spell now; {_duration_note(h)}" for h in now_]
+    lines += [f"- {h.name} Dt.: {CATEGORY_NAME[category(h)]} spell in roughly {h.lead_min} min "
+              f"(~{fmt_time(h.when_utc)}); {_duration_note(h)}" for h in soon]
     rest = [h.name for h in sorted((h for h in all_ordered if h not in listed),
                                    key=lambda h: (h.status != "over", h.lead_min))]
     if rest:
@@ -726,7 +753,8 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
         if any(abs(fx - px) < 0.24 and abs(fy - py) < 0.09 for px, py in placed):
             continue                 # would sit on top of another label; the text of the post still names it
         placed.append((fx, fy))
-        label = h.name if h.status == "over" else f"{h.name}\n~{fmt_time(h.when_utc)}"
+        label = (f"{h.name}\n{CATEGORY_NAME[category(h)]}" if h.status == "over"
+                 else f"{h.name}\n{CATEGORY_NAME[category(h)]} ~{fmt_time(h.when_utc)}")
         ax.annotate(label, (_mx(h.lon), _my(h.lat)), xytext=(0, -22), textcoords="offset points", ha="center", va="top", fontsize=14 if half < 120 else 12,
                     fontweight="bold", zorder=6, path_effects=halo)
     ax.set_xlim(_mx(west), _mx(east))
@@ -737,18 +765,18 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
         sp.set_linewidth(1.5)
 
     where = "Chennai" if all(h.name == "Chennai" for h in hits) else "Tamil Nadu"
-    fig.suptitle(f"{where} radar nowcast: Thunderstorms", fontsize=17.5, fontweight="bold", y=0.985)
-    ax.set_title(f"Colours: now {fmt_time(exp.generated_utc)}   Dashed: ~"
+    fig.suptitle("Experimental Rainfall Nowcast based on IMD Radar", fontsize=15.5, fontweight="bold", y=0.985)
+    ax.set_title(f"{where}: spells of rain\nColours: now {fmt_time(exp.generated_utc)}   Dashed: ~"
                  f"{fmt_time(exp.generated_utc + timedelta(minutes=lead_then))}"
                  + ("   Arrows: motion" if n_arrows else ""), fontsize=12.5, pad=8)
     cb = fig.colorbar(mesh, ax=ax, orientation="horizontal", fraction=0.045, pad=0.025, ticks=[20, 30, 40, 50])
     cb.ax.tick_params(labelsize=13)
-    cb.set_label("radar echo strength (dBZ)", fontsize=13)
+    cb.set_label("radar echo strength (dBZ)    Moderate 35+   Heavy 45+   Very heavy 48+", fontsize=11.5)
     fig.text(0.5, 0.008,
              "Extrapolated from current storm motion, not a guaranteed forecast.  chennairains.com\n"
              "IMD radar data. Map: © OpenStreetMap contributors © CARTO",
              ha="center", fontsize=10, color="#333", linespacing=1.4)
-    fig.subplots_adjust(left=0.03, right=0.97, top=0.91, bottom=0.15)
+    fig.subplots_adjust(left=0.03, right=0.97, top=0.875, bottom=0.15)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -940,7 +968,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
             print(f"[social] image failed, sending text only: {e!r}")
         ordered = order_hits(a.hits, changed)
         details = build_details(listed, ordered)
-        caption = f"{text}\n\n{details}\n\n(Shadow draft, not posted anywhere public. Why: {reason})"
+        caption = f"{text}\n\n{details}\n\nExperimental, automated nowcast from IMD radar. Not an official forecast."
         (drafts / f"{stamp}.txt").write_text(text + "\n")
         _prune_drafts(drafts)
         print(f"[social] DRAFT: {text}")
@@ -951,7 +979,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         if sent:
             regs = state.setdefault("regions", {})
             for h in a.hits:       # everything summarised in this post (named or "+N more") counts as announced
-                rank = 2 if is_intense(h) else 1     # Thunderstorms -> Intense thunderstorms counts as an upgrade
+                rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
                 regs[h.name].update(active=True, last_post=now_utc.isoformat(), last_status=h.status, last_rank=rank)
             state["last_post_utc"] = now_utc.isoformat()
             today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
