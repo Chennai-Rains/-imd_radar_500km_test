@@ -271,7 +271,62 @@ class Assessment:
     reason: str
     hits: list = field(default_factory=list)
     uncovered: list = field(default_factory=list)
+    offshore: list = field(default_factory=list)   # approaching hits dropped: only an offshore band, farther than OFFSHORE_MAX_KM
     n_regions: int = 0
+
+
+OFFSHORE_MAX_KM = 50.0     # a band that is still over the sea is only announced once it is this close to the district
+LAND_NEAR_KM = 150.0       # ...while echo already over land is announced from further away
+_LAND_CACHE: dict = {}
+
+
+def land_mask(exp: Export) -> np.ndarray:
+    """Grid cells inside any district outline (Tamil Nadu, Chennai, Puducherry, Karaikal) = land."""
+    key = (len(exp.lats), len(exp.lons), float(exp.lats[0]), float(exp.lons[0]))
+    if key not in _LAND_CACHE:
+        land = np.zeros((len(exp.lats), len(exp.lons)), dtype=bool)
+        dists, _ = _map_features()
+        from matplotlib.path import Path as MPath
+        for _name, rings in dists:
+            for r in rings:
+                rs, cs = _box(exp.lats, exp.lons, r[:, 1].min(), r[:, 1].max(), r[:, 0].min(), r[:, 0].max())
+                if rs.stop <= rs.start or cs.stop <= cs.start:
+                    continue
+                LAT, LON = np.meshgrid(exp.lats[rs], exp.lons[cs], indexing="ij")
+                m = MPath(r).contains_points(np.column_stack([LON.ravel(), LAT.ravel()])).reshape(LAT.shape)
+                land[rs, cs] |= m
+        _LAND_CACHE[key] = land
+    return _LAND_CACHE[key]
+
+
+def _offshore_only(exp: Export, reg: Region, idx0: int) -> bool:
+    """True when the echo about to reach this region is only a band over the sea that is still
+    farther than OFFSHORE_MAX_KM away (and no echo over land is within LAND_NEAR_KM)."""
+    layer = exp.grid[idx0]
+    pad = 2.0
+    rs, cs = _box(exp.lats, exp.lons, exp.lats[reg.rs].min() - pad, exp.lats[reg.rs].max() + pad,
+                  exp.lons[reg.cs].min() - pad, exp.lons[reg.cs].max() + pad)
+    sub = layer[rs, cs]
+    ys, xs = np.where((sub >= ALERT_DBZ) & (sub < 255))
+    if len(ys) == 0:
+        return False                      # nothing to judge by; leave the hit alone
+    plat, plon = exp.lats[rs][ys], exp.lons[cs][xs]
+    on_land = land_mask(exp)[rs, cs][ys, xs]
+    ry, rx = np.where(reg.sub)
+    rlat, rlon = exp.lats[reg.rs][ry], exp.lons[reg.cs][rx]
+    if len(rlat) > 150:
+        k = np.linspace(0, len(rlat) - 1, 150).astype(int)
+        rlat, rlon = rlat[k], rlon[k]
+    def nearest(mask):
+        if not mask.any():
+            return float("inf")
+        la, lo = plat[mask], plon[mask]
+        if len(la) > 600:
+            k = np.linspace(0, len(la) - 1, 600).astype(int)
+            la, lo = la[k], lo[k]
+        return float(haversine_km_arr(la[:, None], lo[:, None], rlat[None, :], rlon[None, :]).min())
+    d_land, d_sea = nearest(on_land), nearest(~on_land)
+    return not (d_land <= LAND_NEAR_KM or d_sea <= OFFSHORE_MAX_KM)
 
 
 def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) -> Assessment:
@@ -298,7 +353,7 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) 
         idx = [(0, exp.layer_names.index("observed"))]
     idx.sort()
 
-    hits, uncovered = [], []
+    hits, uncovered, offshore = [], [], []
     for reg in regions:
         first_layer = exp.grid[idx[0][1]][reg.rs, reg.cs][reg.sub]
         if (first_layer != 255).mean() < MIN_REGION_COVERAGE:
@@ -317,10 +372,13 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None) 
                     cen = (float(exp.lats[reg.rs][ys].mean()), float(exp.lons[reg.cs][xs].mean()))
                 max_dbz = max(max_dbz, float(v[strong].max()))
                 core = max(core, int(((v >= CORE_DBZ) & (v < 255) & reg.sub).sum()))
+        if first is not None and first > 0 and _offshore_only(exp, reg, idx[0][1]):
+            offshore.append(reg.name)
+            continue
         if first is not None:
             hits.append(Hit(reg.name, "over" if first == 0 else "approaching", first, max_dbz, nodes_first,
                             exp.generated_utc + timedelta(minutes=first), cen[0], cen[1], core, last))
-    return Assessment(True, "ok", hits, uncovered, len(regions))
+    return Assessment(True, "ok", hits, uncovered, offshore, len(regions))
 
 
 # --- episode / dedup state ---------------------------------------------------------
@@ -1086,6 +1144,8 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
              "hits": {h.name: [h.status[0], h.max_dbz, h.core45, h.nodes] for h in a.hits}}   # status, peak dBZ, core nodes, strong nodes
     if a.uncovered:
         entry["no_coverage"] = len(a.uncovered)
+    if a.offshore:
+        entry["offshore_held"] = a.offshore   # approaching, but the band is still over the sea and beyond OFFSHORE_MAX_KM
 
     if action == "send":
         text, listed = build_text(order_hits(a.hits, changed), exp)
