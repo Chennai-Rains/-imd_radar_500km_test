@@ -77,7 +77,7 @@ MAX_RADAR_AGE_MIN = 40     # freshest radar frame older than this -> nowcast is 
 MIN_REGION_COVERAGE = 0.5  # share of a region inside radar coverage; no coverage != dry, so stay quiet there
 
 # --- how often ----------------------------------------------------------------
-CLEAR_AFTER_MIN = 45       # a region must be quiet this long before a new storm there is a NEW episode
+CLEAR_AFTER_MIN = 30       # a region must be quiet this long before a new storm there is a NEW episode
 MIN_GAP_MIN = 30           # minimum time between two posts about the same region
 GLOBAL_MIN_GAP_MIN = 30    # minimum time between any two posts
 MAX_POSTS_PER_DAY = None   # no daily cap (removed 7 Oct: it blocked the afternoon storms); set a number to re-enable
