@@ -121,7 +121,7 @@ nb.OUTPUT_BOT_GRID = Path("output/nowcast_bot_grid_500km_test.bin.gz")
 # next (a ~20,000 sq km patch over the sea west of the coast on 2 Oct 2026),
 # which reads as ground/sea clutter rather than rain, and the bot would
 # report it as rain there. Put it back once that has been cleaned up.
-nb.BOT_EXCLUDED_PRODUCTS = ("mlr_maxz",)
+nb.BOT_EXCLUDED_PRODUCTS = ("mlr_maxz", "cni_ppz")   # cni_ppz: terrain shading reads as echo at its real position until a static terrain mask is in (12 Oct)
 nb.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 nb.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 nb.OUTPUT_HTML.parent.mkdir(parents=True, exist_ok=True)
