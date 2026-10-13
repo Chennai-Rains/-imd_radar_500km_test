@@ -559,6 +559,10 @@ def category(h: Hit) -> int:
     return 1
 
 
+DISCLAIMER = ("Disclaimer: Experimental, automated nowcast based on IMD radar. The above alert is subject to storms "
+              "retaining their intensity and movement. Storms may intensify or weaken in real time.")
+
+
 def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
     """Rain-spell wording (Moderate/Heavy/Very heavy): where it is intense now, which way
     it is moving and where it may go next, then any isolated storms elsewhere. Returns the
@@ -579,16 +583,10 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
         for cat in (3, 2, 1):
             hs = [h for h in m if category(h) == cat]
             if hs:
-                sents.append(f"{CATEGORY_NAME[cat]} rains over parts of {_districts([h.name for h in hs])}.")
-        for cat in (3, 2, 1):
-            hs = [h for h in a if category(h) == cat]
-            if hs:
-                lo, hi = min(h.lead_min for h in hs), max(h.lead_min for h in hs)
-                when = f"in about {lo} min" if lo == hi else f"in {lo} to {hi} min"
-                sents.append(f"Rainbands approaching {_districts([h.name for h in hs])}. "
-                             f"{CATEGORY_NAME[cat]} rains likely {when}.")
+                sents.append(f"{CATEGORY_NAME[cat]} spell of rains over parts of {_districts([h.name for h in hs])}.")
         if a:
-            sents.append("Subject to storms retaining current intensity; they may weaken or intensify in real time.")
+            # header names the districts only; the category and the timeline are in the per-district lines
+            sents.append(f"Rainbands approaching {_districts([h.name for h in a])}.")
         b = motion_bearing(exp, m + a) if (m or a) else None
         if b is not None:
             sents.append(f"Rainbands roughly moving {compass((b + 180) % 360)} to {compass(b)}.")
@@ -637,9 +635,9 @@ def build_details(listed: list[Hit], all_ordered: list[Hit]) -> str:
     roughly how long it may last). No dBZ or node counts (those stay in the decision log)."""
     now_ = sorted((h for h in listed if h.status == "over"), key=lambda h: (-category(h), -h.nodes))
     soon = sorted((h for h in listed if h.status == "approaching"), key=lambda h: (h.lead_min, -category(h)))
-    lines = [f"- {h.name} Dt.: {CATEGORY_NAME[category(h)]} rains now; {_duration_note(h)}" for h in now_]
-    lines += [f"- {h.name} Dt.: rainbands approaching; {CATEGORY_NAME[category(h)]} rains likely in about {h.lead_min} min "
-              f"(~{fmt_time(h.when_utc)}) if the storm keeps its intensity; {_duration_note(h)}" for h in soon]
+    lines = [f"- {h.name} Dt.: {CATEGORY_NAME[category(h)]} spell of rains now; {_duration_note(h)}" for h in now_]
+    lines += [f"- {h.name} Dt.: rainbands approaching; {CATEGORY_NAME[category(h)]} spell of rains likely in about {h.lead_min} min "
+              f"(~{fmt_time(h.when_utc)}), {_duration_note(h)}" for h in soon]
     rest = [h.name for h in sorted((h for h in all_ordered if h not in listed),
                                    key=lambda h: (h.status != "over", h.lead_min))]
     if rest:
@@ -1222,7 +1220,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
             print(f"[social] image failed, sending text only: {e!r}")
         ordered = order_hits(a.hits, changed)
         details = build_details(listed, ordered)
-        caption = f"{text}\n\n{details}\n\nExperimental, automated nowcast from IMD radar. Storms may weaken or intensify in real time compared with the forecast. Not an official forecast."
+        caption = f"{text}\n\n{details}\n\n{DISCLAIMER}"
         (drafts / f"{stamp}.txt").write_text(text + "\n")
         _prune_drafts(drafts)
         print(f"[social] DRAFT: {text}")
