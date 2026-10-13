@@ -20,7 +20,7 @@ checked against real storm days.
 How a widespread day stays readable: a region is announced once per
 "episode" (until it has been quiet for CLEAR_AFTER_MIN), later posts only
 happen for new regions or when one is upgraded from "heading for" to "over",
-posts are at least GLOBAL_MIN_GAP_MIN apart (no daily cap).
+posts are at least GLOBAL_MIN_GAP_MIN apart and at most MAX_POSTS_PER_HOUR in any hour, except Very heavy spells (no daily cap).
 Regions that don't fit in one post stay un-announced and are picked up by the
 next one.
 
@@ -82,8 +82,10 @@ MIN_REGION_COVERAGE = 0.5  # share of a region inside radar coverage; no coverag
 
 # --- how often ----------------------------------------------------------------
 CLEAR_AFTER_MIN = 30       # a region must be quiet this long before a new storm there is a NEW episode
-MIN_GAP_MIN = 30           # minimum time between two posts about the same region
+DISTRICT_MIN_GAP_MIN = 60  # a district already announced is updated (turned heavier / storm now over it) at most once an hour ...
 GLOBAL_MIN_GAP_MIN = 30    # minimum time between any two posts
+MAX_POSTS_PER_HOUR = 2     # strict: at most this many posts in any rolling 60 minutes ...
+# ... EXCEPT a Very heavy spell (a district newly Very heavy, or upgraded to it), which is always announced at once
 MAX_POSTS_PER_DAY = None   # no daily cap (removed 7 Oct: it blocked the afternoon storms); set a number to re-enable
 MAX_NAMED_REGIONS = 6      # a post names at most this many; the rest become "+N more districts" (and count as announced)
 
@@ -451,20 +453,30 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime) -> tuple[str, str, s
         return "skip", "no strong echo over or heading for any region", set()
 
     changed = set()
-    new, upgraded = [], []
+    new, upgraded, vh = [], [], []
     for h in hits:
         st = regs[h.name]
-        if not st.get("active"):
-            new.append(h.name); changed.add(h.name); continue
         rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
+        if not st.get("active"):
+            new.append(h.name); changed.add(h.name)
+            if rank == 3:
+                vh.append(h.name)
+            continue
         went_over = h.status == "over" and st.get("last_status") == "approaching"
-        if (went_over or rank > st.get("last_rank", 0)) and _mins(now_utc, _dt(st.get("last_post"))) >= MIN_GAP_MIN:
+        if rank == 3 and st.get("last_rank", 0) < 3:       # turned Very heavy: never held back
+            upgraded.append(h.name); changed.add(h.name); vh.append(h.name)
+        elif (went_over or rank > st.get("last_rank", 0)) and _mins(now_utc, _dt(st.get("last_post"))) >= DISTRICT_MIN_GAP_MIN:
             upgraded.append(h.name); changed.add(h.name)
     if not changed:
         return "skip", f"already alerted for the {len(hits)} active region(s)", set()
+    if vh:
+        return "send", f"VERY HEAVY: {', '.join(vh)} ({len(new)} new, {len(upgraded)} upgraded)", changed
     gap = _mins(now_utc, _dt(state.get("last_post_utc")))
     if gap < GLOBAL_MIN_GAP_MIN:
         return "skip", f"{len(changed)} change(s) waiting, last post was {gap:.0f} min ago (< {GLOBAL_MIN_GAP_MIN})", set()
+    recent = [t for t in state.get("post_times", []) if _mins(now_utc, _dt(t)) < 60]
+    if len(recent) >= MAX_POSTS_PER_HOUR:
+        return "skip", f"{len(changed)} change(s) waiting, {len(recent)} posts already in the last hour", set()
     today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
     if MAX_POSTS_PER_DAY is not None and state.get("posts", {}).get(today, 0) >= MAX_POSTS_PER_DAY:
         return "skip", f"daily cap of {MAX_POSTS_PER_DAY} posts reached", set()
@@ -529,8 +541,8 @@ def _districts(names: list[str]) -> str:
 
 
 # "Very heavy spells": peak at/above INTENSE_DBZ AND a real core (INTENSE_CORE_NODES nodes at/above
-# CORE_DBZ, about 15 km2), so one stray bright node does not promote a district. Set from a replay of 64
-# alert cycles (6-10 Oct 2026, 226 district-hits): about 1 in 5 hits is Intense, in about 4 of 10 cycles.
+# CORE_DBZ, about 15 km2), so one stray bright node does not promote a district. At 52 dBZ (13 Oct 2026) a replay
+# of 10-13 Oct shows about 3.5% of district-hits and 4% of cycles (about 6 episodes in 3 days); at 48 it was 11.6% / 18%.
 INTENSE_DBZ = 48.0
 INTENSE_CORE_NODES = 3
 ISOLATED_MAX_NODES = 20    # an "over" region with fewer strong nodes than this, away from the main storms, is isolated
@@ -1234,6 +1246,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
                 rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
                 regs[h.name].update(active=True, last_post=now_utc.isoformat(), last_status=h.status, last_rank=rank)
             state["last_post_utc"] = now_utc.isoformat()
+            state["post_times"] = [t for t in state.get("post_times", []) if _mins(now_utc, _dt(t)) < 120] + [now_utc.isoformat()]
             today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
             posts = state.setdefault("posts", {})
             posts[today] = posts.get(today, 0) + 1
