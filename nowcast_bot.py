@@ -175,7 +175,7 @@ PRODUCT_RADAR = {
     "ppi": "niot", "maxz": "niot", "ppz": "niot",
     "kkl_ppi": "karaikal", "kkl_ppz": "karaikal", "kkl_maxz": "karaikal",
     "koc_maxz": "kochi",
-    "cni_maxz": "chennai", "cni_ppz": "chennai",
+    "cni_maxz": "chennai", "cni_ppz": "chennai", "cni_ppi": "chennai",
     "mlr_maxz": "mangalore",
     "tvm_maxz": "trivandrum", "tvm_ppi": "trivandrum",
 }
@@ -574,6 +574,42 @@ PRODUCTS = {
     # cedes its own inner 250km disc to cni_maxz's higher resolution via
     # mask_within_km, contributing only the 250-600km ring cni_maxz's own
     # image can't reach.
+    # --- Chennai DWR PPI (ppi_cni.gif): the lowest tilt (0.2 deg), 150 km, 0.375 km/pixel. Added 14 Oct 2026 as a
+    # test-only alternative to cni_maxz: the column-max (MAXZ) picture reported 46-53 dBZ over Chennai at 2-4 AM IST
+    # where NIOT showed nothing, and a single low tilt reads closer to what reaches the ground. Calibrated from one
+    # real frame (13 Oct 2026 22:00 UTC, 1019x800): plan view x 0-799, y 0-799, the frame's own gridlines are at
+    # 80 degE x=316 and 81 degE x=604.5, 13 degN y=420 and 14 degN y=124 / 12 degN y=716.5 (289 px per degree of
+    # longitude, 296 px per degree of latitude = 0.375 km/px), so RADAR_SITES["chennai"] lands at about (375.7, 393.3).
+    # (The rings are centred near (400, 400), ~8 km east of that site, so max_range_km stays well inside 150.)
+    # Colour bar: 17 swatches, y 74-622, boundaries printed at 60.0, 56.0, 52.1 ... 4.6, 0.7 dBZ (3.9 dBZ steps), so
+    # each swatch gets the middle of its band ("colorbar_bands"); the top one is "above 60", the bottom "below 0.7".
+    "cni_ppi": {
+        "url": "https://mausam.imd.gov.in/Radar/ppi_cni.gif",
+        "min_swatch_rows": 2,
+        "role": "aloft_early_warning",
+        "range_km": 150.0,
+        "max_range_km": 135.0,
+        "elevation_deg": 0.2,
+        "image_size": (1019, 800),
+        "site_px": (375.7, 393.3),
+        "km_per_px": 1.0 / 0.375,   # pixels per km (see the note on km_per_px)
+        "colorbar_bbox": (810, 74, 886, 622),
+        "colorbar_bands": [62.0, 58.0, 54.0, 50.1, 46.2, 42.2, 38.3, 34.3, 30.3, 26.4, 22.4, 18.5, 14.5, 10.5, 6.6, 2.6, 0.0],
+        "value_at_top": 62.0,
+        "value_at_bottom": 0.0,
+        "timestamp_bbox": (805, 26, 1019, 52),
+        "elevation_bbox": (805, 745, 1019, 765),
+        "plot_bbox": (0, 0, 799, 800),
+        "cell_dbz_threshold": 35,
+        "despeckle_min_px": 8,
+        "exclude_colors": [
+            (102, 204, 255), (153, 204, 255), (102, 153, 255), (153, 153, 255),
+            (102, 153, 204), (102, 204, 204), (153, 153, 204), (153, 204, 204),
+        ],
+        "label_exclude_boxes": [
+            (705, 685, 799, 800),   # national emblem/seal, bottom-right of the plan view
+        ],
+    },
     "cni_ppz": {
         "url": "https://mausam.imd.gov.in/Radar/ppz_cni.gif",
         # Same single-row colour-bar swatch fix as cni_maxz (see there): stray
@@ -2114,6 +2150,7 @@ PRODUCT_STYLE = {
     "koc_maxz": {"color": "#2ca02c", "label": "Kochi MAXZ - aloft / building"},
     "cni_maxz": {"color": "#e377c2", "label": "Chennai DWR MAXZ - aloft / building"},
     "cni_ppz": {"color": "#7f7f7f", "label": "Chennai Extended Radar"},
+    "cni_ppi": {"color": "#e377c2", "label": "Chennai DWR PPI (0.2 deg)"},
     "mlr_maxz": {"color": "#bcbd22", "label": "Mangaluru DWR MAXZ - aloft / building"},
     "tvm_maxz": {"color": "#9467bd", "label": "Trivandrum DWR MAXZ - aloft / building"},
     "tvm_ppi": {"color": "#9467bd", "label": "Trivandrum DWR PPI (2 deg)"},
@@ -3621,6 +3658,11 @@ BOT_NO_COVERAGE = 255
 # from: its echo, coverage, cells and motion are all kept out of the grid,
 # and it is listed in "radars" with status "excluded".
 BOT_EXCLUDED_PRODUCTS: tuple = ()
+# Where the lowest-tilt PPI of a radar (cni_ppi) has a picture this cycle, it is trusted over that radar's column-max
+# MAXZ (cni_maxz) -- on 13-14 Oct 2026 MAXZ read about 2x the strong (35+ dBZ) area and a higher core than the 0.2 deg
+# PPI of the same radar at the same minute, which produced three false "Very heavy" alerts. If the PPI is missing or stale
+# this cycle the MAXZ simply stays in use.
+BOT_DEFER_TO: dict = {"cni_maxz": "cni_ppi"}
 BOT_LONG_RANGE_PRODUCTS: tuple = ("cni_ppz", "kkl_ppz")   # see the cross-check block in export_bot_data()
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -3836,6 +3878,19 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             entry["motion"] = note
             w_sum += w; u_sum += w * u; v_sum += w * v
         radars.append(entry)
+
+    # ---- a radar's column-max picture defers to its own low-tilt PPI ----
+    for weak, strong in BOT_DEFER_TO.items():
+        if weak not in regridded or strong not in regridded:
+            continue
+        site = site_for(strong)
+        reach = min(PRODUCTS[strong]["range_km"], PRODUCTS[strong].get("max_range_km") or 1e9)
+        dist = np.hypot((lat2d - site["site_lat"]) * 111.0,
+                        (lon2d - site["site_lon"]) * 111.0 * np.cos(np.radians(site["site_lat"])))
+        covered = dist <= reach
+        if covered.any():
+            regridded[weak] = np.where(covered, np.nan, regridded[weak])
+            print(f"[bot-export] {weak}: {int(covered.sum())} nodes left to {strong}")
 
     # ---- long-range products defer to the better radar ----
     # The extended products (Chennai 250-600 km, Karaikal 250-500 km) are coarse, look at higher levels and
