@@ -562,9 +562,16 @@ HEAVY_CORE_NODES = 2       # nodes at/above HEAVY_DBZ, so one bright node does n
 CATEGORY_NAME = {1: "Moderate", 2: "Heavy", 3: "Very heavy"}
 
 
+# Very heavy alerts are held back (14 Oct 2026): the spells so far gave about 2 cm/h (Moderate/Heavy depending on how long
+# they last), so a Very heavy label overstates them. While this is False nothing is ever called Very heavy (the strongest
+# spells go out as Heavy), the Very heavy exceptions to the posting limits never fire, and -- because night-time posting is
+# limited to Very heavy -- nothing is posted 23:00-04:00 IST. Set it to True to switch them back on.
+VERY_HEAVY_ENABLED = False
+
+
 def category(h: Hit) -> int:
-    """1 Moderate, 2 Heavy, 3 Very heavy spell of rain."""
-    if is_intense(h) and h.vh_ok:
+    """1 Moderate, 2 Heavy, 3 Very heavy spell of rain (3 only while VERY_HEAVY_ENABLED)."""
+    if VERY_HEAVY_ENABLED and is_intense(h) and h.vh_ok:
         return 3
     if h.max_dbz >= HEAVY_DBZ and h.core45 >= HEAVY_CORE_NODES:
         return 2
@@ -1003,7 +1010,7 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
                  + ("   Arrows: motion" if n_arrows else ""), fontsize=12.5, pad=8)
     cb = fig.colorbar(mesh, ax=ax, orientation="horizontal", fraction=0.045, pad=0.025, ticks=[20, 30, 40, 50])
     cb.ax.tick_params(labelsize=13)
-    cb.set_label(f"radar echo strength (dBZ)    Moderate 35+   Heavy 45+   Very heavy {INTENSE_DBZ:.0f}+", fontsize=11.5)
+    cb.set_label("radar echo strength (dBZ)    Moderate 35+   Heavy 45+" + (f"   Very heavy {INTENSE_DBZ:.0f}+" if VERY_HEAVY_ENABLED else ""), fontsize=11.5)
     fig.text(0.5, 0.008,
              "Extrapolated from current storm motion, not a guaranteed forecast.  chennairains.com\n"
              "IMD radar data. Map: © OpenStreetMap contributors © CARTO",
