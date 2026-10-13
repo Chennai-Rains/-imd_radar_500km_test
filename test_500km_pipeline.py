@@ -132,6 +132,14 @@ nb.OUTPUT_HTML.parent.mkdir(parents=True, exist_ok=True)
 # already patched above), so no need to touch those globals separately.
 nb.run_pipeline()
 
+# Paired Chennai PPI / MAXZ statistics for the later MAXZ calibration (see radar_pair_log.py); never affects the map or alerts.
+try:
+    import radar_pair_log
+    from datetime import datetime, timezone
+    radar_pair_log.log_pair(datetime.now(timezone.utc))
+except Exception as e:
+    print(f"[pair-log] failed (nothing else is affected): {e!r}")
+
 # Social-media storm alerts, SHADOW MODE: drafts a post (text + image) when
 # strong echo is over/heading for Chennai and sends it ONLY to a private
 # Telegram chat for review -- nothing is published publicly. Reads the bot
