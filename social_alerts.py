@@ -543,7 +543,7 @@ def _districts(names: list[str]) -> str:
 # "Very heavy spells": peak at/above INTENSE_DBZ AND a real core (INTENSE_CORE_NODES nodes at/above
 # CORE_DBZ, about 15 km2), so one stray bright node does not promote a district. At 52 dBZ (13 Oct 2026) a replay
 # of 10-13 Oct shows about 3.5% of district-hits and 4% of cycles (about 6 episodes in 3 days); at 48 it was 11.6% / 18%.
-INTENSE_DBZ = 48.0
+INTENSE_DBZ = 52.0         # raised from 48 on 13 Oct 2026: 52 dBZ is ~65 mm/h (Z = 200 R^1.6), i.e. 6 cm/h or more
 INTENSE_CORE_NODES = 3
 ISOLATED_MAX_NODES = 20    # an "over" region with fewer strong nodes than this, away from the main storms, is isolated
 ISOLATED_MIN_KM = 80.0
@@ -1003,7 +1003,7 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
                  + ("   Arrows: motion" if n_arrows else ""), fontsize=12.5, pad=8)
     cb = fig.colorbar(mesh, ax=ax, orientation="horizontal", fraction=0.045, pad=0.025, ticks=[20, 30, 40, 50])
     cb.ax.tick_params(labelsize=13)
-    cb.set_label("radar echo strength (dBZ)    Moderate 35+   Heavy 45+   Very heavy 48+", fontsize=11.5)
+    cb.set_label(f"radar echo strength (dBZ)    Moderate 35+   Heavy 45+   Very heavy {INTENSE_DBZ:.0f}+", fontsize=11.5)
     fig.text(0.5, 0.008,
              "Extrapolated from current storm motion, not a guaranteed forecast.  chennairains.com\n"
              "IMD radar data. Map: © OpenStreetMap contributors © CARTO",
