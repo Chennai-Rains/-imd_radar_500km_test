@@ -560,7 +560,7 @@ def category(h: Hit) -> int:
 
 
 DISCLAIMER = ("Disclaimer: Experimental, automated nowcast based on IMD radar. The above alert is subject to storms "
-              "retaining their intensity and movement. Storms may intensify or weaken in real time.")
+              "retaining their intensity and movement. Storms may intensify / weaken in real time.")
 
 
 def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
