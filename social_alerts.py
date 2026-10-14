@@ -649,6 +649,10 @@ def _duration_note(h: Hit) -> str:
     return f"may last about {max(dur, 10)} min"
 
 
+# 14 Oct 2026: the caption carries only the overview (which districts, which way the bands move) and the disclaimer; the
+# per-district timeline is on the image (each district is labelled with its category and time). Set True to add the
+# "- District Dt.: ..." lines back under the overview.
+SHOW_DISTRICT_LINES = False
 CAPTION_LIMIT = 1020   # Telegram allows 1024 characters in a photo caption
 
 
@@ -1257,7 +1261,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
             print(f"[social] image failed, sending text only: {e!r}")
         ordered = order_hits(a.hits, changed)
         details = build_details(listed, ordered)
-        caption = fit_caption(text, details)
+        caption = fit_caption(text, details if SHOW_DISTRICT_LINES else "")
         (drafts / f"{stamp}.txt").write_text(text + "\n")
         _prune_drafts(drafts)
         print(f"[social] DRAFT: {text}")
