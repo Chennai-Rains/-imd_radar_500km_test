@@ -649,14 +649,32 @@ def _duration_note(h: Hit) -> str:
     return f"may last about {max(dur, 10)} min"
 
 
+CAPTION_LIMIT = 1020   # Telegram allows 1024 characters in a photo caption
+
+
+def fit_caption(text: str, details: str, disclaimer: str = None, limit: int = CAPTION_LIMIT) -> str:
+    """Header + per-district lines + disclaimer inside the caption limit: when it is too long the last district lines are
+    replaced by "(+N more districts)", so the disclaimer is never the part that gets cut."""
+    disclaimer = DISCLAIMER if disclaimer is None else disclaimer
+    lines = details.split("\n") if details else []
+    dropped = 0
+    while True:
+        body = "\n".join(lines + ([f"- ...and {dropped} more district(s)"] if dropped else []))
+        cap = f"{text}\n\n{body}\n\n{disclaimer}" if body else f"{text}\n\n{disclaimer}"
+        if len(cap) <= limit or not lines:
+            return cap
+        lines.pop()
+        dropped += 1
+
+
 def build_details(listed: list[Hit], all_ordered: list[Hit]) -> str:
     """Per district: the category of the spell and the estimated timeline (when it starts and
     roughly how long it may last). No dBZ or node counts (those stay in the decision log)."""
     now_ = sorted((h for h in listed if h.status == "over"), key=lambda h: (-category(h), -h.nodes))
     soon = sorted((h for h in listed if h.status == "approaching"), key=lambda h: (h.lead_min, -category(h)))
-    lines = [f"- {h.name} Dt.: {CATEGORY_NAME[category(h)]} spell of rains now; {_duration_note(h)}" for h in now_]
+    lines = [f"- {h.name} Dt.: {CATEGORY_NAME[category(h)]} spell of rains now" for h in now_]
     lines += [f"- {h.name} Dt.: rainbands approaching; {CATEGORY_NAME[category(h)]} spell of rains likely in about {h.lead_min} min "
-              f"(~{fmt_time(h.when_utc)}), {_duration_note(h)}" for h in soon]
+              f"(~{fmt_time(h.when_utc)})" for h in soon]
     rest = [h.name for h in sorted((h for h in all_ordered if h not in listed),
                                    key=lambda h: (h.status != "over", h.lead_min))]
     if rest:
@@ -1239,7 +1257,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
             print(f"[social] image failed, sending text only: {e!r}")
         ordered = order_hits(a.hits, changed)
         details = build_details(listed, ordered)
-        caption = f"{text}\n\n{details}\n\n{DISCLAIMER}"
+        caption = fit_caption(text, details)
         (drafts / f"{stamp}.txt").write_text(text + "\n")
         _prune_drafts(drafts)
         print(f"[social] DRAFT: {text}")
