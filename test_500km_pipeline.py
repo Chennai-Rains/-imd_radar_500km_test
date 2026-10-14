@@ -140,6 +140,14 @@ try:
 except Exception as e:
     print(f"[pair-log] failed (nothing else is affected): {e!r}")
 
+# Storm intensity-trend log (see storm_trend_log.py): tracks storm blobs run to run for the later intensifying /
+# weakening evaluation; never affects the map or the alerts.
+try:
+    import storm_trend_log
+    storm_trend_log.log_trends(nb.OUTPUT_BOT_JSON, nb.OUTPUT_BOT_GRID)
+except Exception as e:
+    print(f"[trend-log] failed (nothing else is affected): {e!r}")
+
 # Social-media storm alerts, SHADOW MODE: drafts a post (text + image) when
 # strong echo is over/heading for Chennai and sends it ONLY to a private
 # Telegram chat for review -- nothing is published publicly. Reads the bot
