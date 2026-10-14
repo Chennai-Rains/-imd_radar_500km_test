@@ -42,7 +42,7 @@ for j in range(NC+1):
     ax.plot([X(west+j*s._GRID_DLON)]*2,[Y(south),Y(south+NR*s._GRID_DLAT)],color="#1a1a1a",lw=1.1,zorder=4)
 # radar circles
 t=np.linspace(0,2*np.pi,200)
-for nm,(la,lo),rad,ls in [("Chennai",(13.0901,80.2067),250,"-"),("Karaikal",(10.9254,79.838),250,"-"),("Trivandrum",(8.5374,76.8657),125,"-")]:
+for nm,(la,lo),rad,ls in [("Chennai",(13.083747,80.290057),250,"-"),("Karaikal",(10.9254,79.838),250,"-"),("Trivandrum",(8.5374,76.8657),125,"-")]:
     ax.plot(X(lo+rad/(111.195*math.cos(math.radians(la)))*np.cos(t)),Y(la+rad/111.195*np.sin(t)),color="#1b6ec2",lw=1.6,ls=ls,alpha=0.85,zorder=5)
     ax.plot([X(lo)],[Y(la)],marker="^",ms=9,mfc="#1b6ec2",mec="white",mew=1,zorder=6)
 # cell ids: column letters A.. west->east, rows 1.. north->south
