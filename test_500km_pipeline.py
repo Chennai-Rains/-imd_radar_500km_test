@@ -148,6 +148,14 @@ try:
 except Exception as e:
     print(f"[trend-log] failed (nothing else is affected): {e!r}")
 
+# Nowcast verification log (see forecast_verify.py): scores plus_30/60/90 against later observations and against
+# persistence; never affects the map or the alerts.
+try:
+    import forecast_verify
+    forecast_verify.verify(nb.OUTPUT_BOT_JSON, nb.OUTPUT_BOT_GRID)
+except Exception as e:
+    print(f"[fcst-verify] failed (nothing else is affected): {e!r}")
+
 # Social-media storm alerts, SHADOW MODE: drafts a post (text + image) when
 # strong echo is over/heading for Chennai and sends it ONLY to a private
 # Telegram chat for review -- nothing is published publicly. Reads the bot
