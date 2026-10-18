@@ -2107,6 +2107,22 @@ def fuse_products(ppi_cells: list[Cell], maxz_cells: list[Cell],
 
 
 # === CELL 14 (fetch/state/health) ===
+_FETCH_STATUS: dict = {}
+
+
+def _log_fetch(url, result, code, last_modified, size, error=None):
+    """Keeps the latest outcome of each IMD fetch in fetch_status.json (committed with the state) so a frozen map
+    can be diagnosed without the Actions logs."""
+    try:
+        _FETCH_STATUS[url.rsplit("/", 1)[-1]] = {"t": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "result": result,
+                                                 "http": code, "last_modified": last_modified, "bytes": size, "error": error}
+        d = STATE_FILE.parent
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "fetch_status.json").write_text(json.dumps(_FETCH_STATUS, indent=1))
+    except Exception:
+        pass
+
+
 def fetch_frame(url: str) -> bytes | None:
     # Cache-busting: IMD's server (or a CDN/proxy in front of it) may serve
     # a cached copy of the GIF on a plain GET, which would look identical
@@ -2117,9 +2133,11 @@ def fetch_frame(url: str) -> bytes | None:
         r = requests.get(bust_url, timeout=20,
                           headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
         r.raise_for_status()
+        _log_fetch(url, "ok", r.status_code, r.headers.get("Last-Modified"), len(r.content))
         return r.content
     except requests.RequestException as e:
         print(f"[fetch] {url} failed: {e}")
+        _log_fetch(url, "failed", getattr(getattr(e, "response", None), "status_code", None), None, 0, str(e)[:160])
         return None
 
 
