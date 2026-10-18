@@ -55,6 +55,7 @@ TN_PLACES = HERE / "assets" / "tn_places.json"   # towns and cities from OpenStr
 # --- where / how strong ------------------------------------------------------
 CHENNAI = (13.0827, 80.2707)
 CHENNAI_ZONE_KM = 40.0     # "Chennai": city + immediate suburbs (the old single zone)
+CHENNAI_LAND_ONLY = True   # ...counting only the land inside that circle (echo over the sea there is not "Chennai")
 CORE_DBZ = 45.0            # core of a storm, for the Intense category
 ALERT_DBZ = 35.0           # grid node counts as strong echo at/above this
 MIN_REGION_NODES = 8       # grid step is ~2.2 km (~5 km2/node): ~40 km2 of strong echo. 6 nodes on an edge was a real false alarm (5 Oct)
@@ -255,6 +256,11 @@ def build_district_regions(lats, lons, geojson_path: Path = TN_GEOJSON) -> list[
     if rs.stop > rs.start and cs.stop > cs.start:
         LAT, LON = np.meshgrid(lats[rs], lons[cs], indexing="ij")
         sub = haversine_km_arr(LAT, LON, CHENNAI[0], CHENNAI[1]) <= CHENNAI_ZONE_KM
+        if CHENNAI_LAND_ONLY and geojson_path == TN_GEOJSON and TN_GEOJSON.exists():
+            # Only the land part of the circle counts (19 Oct 2026: two Chennai alerts came from a band 20-30 km out
+            # at sea that was moving along the coast, not onto it). Strong echo now over land, or moved onto land by
+            # any forecast layer up to +90 min, still triggers; a band that stays at sea does not.
+            sub &= land_mask_grid(lats, lons)[rs, cs]
         if sub.any():
             regions.append(Region("Chennai", rs, cs, sub, int(sub.sum())))
     gj = json.loads(Path(geojson_path).read_text())
@@ -309,23 +315,27 @@ LAND_NEAR_KM = 150.0       # ...while echo already over land is announced from f
 _LAND_CACHE: dict = {}
 
 
-def land_mask(exp: Export) -> np.ndarray:
+def land_mask_grid(lats, lons) -> np.ndarray:
     """Grid cells inside any district outline (Tamil Nadu, Chennai, Puducherry, Karaikal) = land."""
-    key = (len(exp.lats), len(exp.lons), float(exp.lats[0]), float(exp.lons[0]))
+    key = (len(lats), len(lons), float(lats[0]), float(lons[0]))
     if key not in _LAND_CACHE:
-        land = np.zeros((len(exp.lats), len(exp.lons)), dtype=bool)
+        land = np.zeros((len(lats), len(lons)), dtype=bool)
         dists, _ = _map_features()
         from matplotlib.path import Path as MPath
         for _name, rings in dists:
             for r in rings:
-                rs, cs = _box(exp.lats, exp.lons, r[:, 1].min(), r[:, 1].max(), r[:, 0].min(), r[:, 0].max())
+                rs, cs = _box(lats, lons, r[:, 1].min(), r[:, 1].max(), r[:, 0].min(), r[:, 0].max())
                 if rs.stop <= rs.start or cs.stop <= cs.start:
                     continue
-                LAT, LON = np.meshgrid(exp.lats[rs], exp.lons[cs], indexing="ij")
+                LAT, LON = np.meshgrid(lats[rs], lons[cs], indexing="ij")
                 m = MPath(r).contains_points(np.column_stack([LON.ravel(), LAT.ravel()])).reshape(LAT.shape)
                 land[rs, cs] |= m
         _LAND_CACHE[key] = land
     return _LAND_CACHE[key]
+
+
+def land_mask(exp: Export) -> np.ndarray:
+    return land_mask_grid(exp.lats, exp.lons)
 
 
 def _offshore_only(exp: Export, reg: Region, idx0: int) -> bool:
