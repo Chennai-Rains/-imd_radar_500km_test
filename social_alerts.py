@@ -601,7 +601,7 @@ DISCLAIMER = ("Disclaimer: Experimental, automated nowcast based on IMD radar. T
               "retaining their intensity and movement. Storms may intensify / weaken in real time. Not an official forecast.")
 
 
-def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
+def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automated Rainfall Nowcast") -> tuple[str, list[Hit]]:
     """Rain-spell wording (Moderate/Heavy/Very heavy): where it is intense now, which way
     it is moving and where it may go next, then any isolated storms elsewhere. Returns the
     text and the hits it names; the others become "+N more districts"."""
@@ -636,7 +636,7 @@ def build_text(hits_ordered: list[Hit], exp: Export) -> tuple[str, list[Hit]]:
         body = " ".join(sents)
         if dropped:
             body += f" (+{dropped} more districts)"
-        return f"COMK Automated Rainfall Nowcast ({asof} IST): {body} {HASHTAGS}", listed
+        return f"{header} ({asof} IST): {body} {HASHTAGS}", listed
 
     n_m, n_a, n_i = min(len(main), MAX_NAMED_REGIONS), min(len(appr_all), 4), min(len(iso), 2)
     while True:
@@ -1214,7 +1214,10 @@ def _prune_drafts(folder: Path) -> None:
 PUBLIC_POSTING = True                       # set False to switch the whole public-posting step off
 PUBLIC_REGIONS = ("Chennai", "Tiruvallur", "Chengalpattu", "Kancheepuram")
 PUBLIC_MIN_GAP_MIN = 60                     # at most one public post in any 60 minutes
-X_DISCLAIMER = "Experimental automated nowcast from IMD radar. Not an official forecast."
+# The handle also carries the owner's own posts, so the public wording does not say "automated" (Telegram keeps it).
+PUBLIC_HEADER = "COMK Rainfall Nowcast"
+PUBLIC_DISCLAIMER = DISCLAIMER.replace("Experimental, automated nowcast", "Experimental nowcast")
+X_DISCLAIMER = "Experimental nowcast from IMD radar. Not an official forecast."
 
 
 def _public_cycle(a: "Assessment", exp: Export, state: dict, entry: dict, now_utc: datetime, tile_url) -> None:
@@ -1226,7 +1229,7 @@ def _public_cycle(a: "Assessment", exp: Export, state: dict, entry: dict, now_ut
     info = {"action": action, "reason": reason}
     if action == "send":
         ordered = order_hits(ph, changed)
-        text, listed = build_text(ordered, exp)
+        text, listed = build_text(ordered, exp, header=PUBLIC_HEADER)
         stamp = now_utc.astimezone(IST).strftime("%Y%m%d_%H%M%S")
         drafts = Path("state_social_test/drafts")
         drafts.mkdir(parents=True, exist_ok=True)
@@ -1237,7 +1240,7 @@ def _public_cycle(a: "Assessment", exp: Export, state: dict, entry: dict, now_ut
         except Exception as e:
             print(f"[social] public image failed, posting text only: {e!r}")
         x_text = social_publish.fit_x_text(text, X_DISCLAIMER, HASHTAGS)
-        fb_text = f"{text}\n\n{DISCLAIMER}"
+        fb_text = f"{text}\n\n{PUBLIC_DISCLAIMER}"
         res = social_publish.publish(x_text, fb_text, image, stamp)
         info.update(mode=res["mode"], x=res["x"], facebook=res["facebook"], listed=[h.name for h in listed], text=text)
         if res["any_ok"]:
