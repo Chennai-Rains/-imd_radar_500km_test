@@ -1216,8 +1216,8 @@ PUBLIC_REGIONS = ("Chennai", "Tiruvallur", "Chengalpattu", "Kancheepuram")
 PUBLIC_MIN_GAP_MIN = 60                     # at most one public post in any 60 minutes
 # The handle also carries the owner's own posts, so the public wording does not say "automated" (Telegram keeps it).
 PUBLIC_HEADER = "COMK Rainfall Nowcast"
-PUBLIC_DISCLAIMER = DISCLAIMER.replace("Experimental, automated nowcast", "Experimental nowcast")
-X_DISCLAIMER = "Experimental nowcast from IMD radar. Not an official forecast."
+PUBLIC_DISCLAIMER = DISCLAIMER.replace("Experimental, automated nowcast", "Experimental Nowcast").replace("IMD radar.", "IMD Radar. Updates at most once an hour.", 1)
+X_DISCLAIMER = "Experimental Nowcast based on IMD Radar. Updates at most once an hour."
 
 
 def _public_cycle(a: "Assessment", exp: Export, state: dict, entry: dict, now_utc: datetime, tile_url) -> None:
