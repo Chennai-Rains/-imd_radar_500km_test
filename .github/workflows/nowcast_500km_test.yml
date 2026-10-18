@@ -64,7 +64,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           # public posting (X + Facebook Page): a dry run unless PUBLIC_POST_ENABLED is the text 'true' (repository variable)
-          PUBLIC_POST_ENABLED: ${{ vars.PUBLIC_POST_ENABLED }}
+          PUBLIC_POST_ENABLED: ${{ vars.PUBLIC_POST_ENABLED || secrets.PUBLIC_POST_ENABLED }}
           X_API_KEY: ${{ secrets.X_API_KEY }}
           X_API_SECRET: ${{ secrets.X_API_SECRET }}
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
