@@ -139,3 +139,21 @@ def publish(x_text: str, fb_text: str, image: Path | None, stamp: str) -> dict:
     res["any_ok"] = bool(res["x"][0] or res["facebook"][0])
     _record({k: v for k, v in res.items()})
     return res
+
+
+def send_test_x() -> tuple[bool, str]:
+    """Manual check (workflow input send_test_x): one harmless test post with a small image to X ONLY, regardless of
+    PUBLIC_POST_ENABLED, to prove the keys, the image upload and the posting work. The outcome (never the keys) is left in
+    state_social_test/public_last.json."""
+    from PIL import Image, ImageDraw
+    DRAFT_DIR.mkdir(parents=True, exist_ok=True)
+    img = Image.new("RGB", (900, 500), (235, 242, 250))
+    d = ImageDraw.Draw(img)
+    d.text((40, 220), "COMK experimental rainfall nowcast - link test image", fill=(30, 50, 90))
+    path = DRAFT_DIR / "x_test.png"
+    img.save(path)
+    stamp = datetime.now(timezone.utc).strftime("%H:%M UTC")
+    ok, detail = post_x(f"Test post ({stamp}) while the COMK experimental rainfall nowcast account is being set up. Please ignore.", path)
+    _record({"mode": "manual_test_x", "x": [ok, detail]})
+    print(f"[public] X test post: {'OK' if ok else 'FAILED'} - {detail}")
+    return ok, detail

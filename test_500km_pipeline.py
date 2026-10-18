@@ -148,6 +148,14 @@ try:
 except Exception as e:
     print(f"[trend-log] failed (nothing else is affected): {e!r}")
 
+# One-off check of the X credentials (workflow input send_test_x): posts one harmless test tweet with an image.
+if os.environ.get("SOCIAL_TEST_X") == "true":
+    try:
+        import social_publish
+        social_publish.send_test_x()
+    except Exception as e:
+        print(f"[public] X test post failed: {e!r}")
+
 # Nowcast verification log (see forecast_verify.py): scores plus_30/60/90 against later observations and against
 # persistence; never affects the map or the alerts.
 try:
