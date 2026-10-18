@@ -451,7 +451,7 @@ def _mins(now, then):
 
 
 def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = None, max_per_hour: int = None,
-           vh_exception: bool = True, district_gap: float = None) -> tuple[str, str, set]:
+           vh_exception: bool = True, district_gap: float = None, refresh_gap: float = None) -> tuple[str, str, set]:
     """("send"|"skip", reason, names of regions that are new or upgraded).
     Mutates state only for bookkeeping that does not depend on whether a post
     went out (last hit time, episode end); the caller records the post itself
@@ -486,6 +486,8 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
             upgraded.append(h.name); changed.add(h.name); vh.append(h.name)
         elif (went_over or rank > st.get("last_rank", 0)) and _mins(now_utc, _dt(st.get("last_post"))) >= district_gap:
             upgraded.append(h.name); changed.add(h.name)
+        elif refresh_gap is not None and _mins(now_utc, _dt(st.get("last_post"))) >= refresh_gap:
+            upgraded.append(h.name); changed.add(h.name)      # echo still there an hour after the last post: rain continuing
     if not changed:
         return "skip", f"already alerted for the {len(hits)} active region(s)", set()
     if vh:
@@ -1213,6 +1215,7 @@ def _prune_drafts(folder: Path) -> None:
 # --- public platforms --------------------------------------------------------------------
 PUBLIC_POSTING = True                       # set False to switch the whole public-posting step off
 PUBLIC_REGIONS = ("Chennai", "Tiruvallur", "Chengalpattu", "Kancheepuram")
+PUBLIC_REFRESH_MIN = 60                     # a region still active this long after its last post is posted again (rain continuing)
 PUBLIC_MIN_GAP_MIN = 60                     # at most one public post in any 60 minutes
 # The handle also carries the owner's own posts, so the public wording does not say "automated" (Telegram keeps it).
 PUBLIC_HEADER = "COMK Rainfall Nowcast"
@@ -1225,7 +1228,7 @@ def _public_cycle(a: "Assessment", exp: Export, state: dict, entry: dict, now_ut
     pub = state.setdefault("public", {})
     ph = [h for h in a.hits if h.name in PUBLIC_REGIONS]
     action, reason, changed = decide(ph, pub, now_utc, global_gap=PUBLIC_MIN_GAP_MIN, max_per_hour=1,
-                                     vh_exception=False, district_gap=PUBLIC_MIN_GAP_MIN)
+                                     vh_exception=False, district_gap=PUBLIC_MIN_GAP_MIN, refresh_gap=PUBLIC_REFRESH_MIN)
     info = {"action": action, "reason": reason}
     if action == "send":
         ordered = order_hits(ph, changed)
