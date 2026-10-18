@@ -124,6 +124,21 @@ def fmt_time(dt: datetime) -> str:
     return dt.astimezone(IST).strftime("%I:%M %p").lstrip("0")
 
 
+# 18 Oct 2026: arrival is given as a time WINDOW, not "in N minutes" -- the radar picture is 20-30 min old and the motion
+# behind the moved-forward layers is uncertain, so a single minute figure overstates what is known. The window is centred
+# on the estimated arrival and widens with the lead (+-10 min up to 30 min ahead, +-15 up to 60, +-20 beyond), snapped to 5.
+def window_text(h: "Hit", now_utc: datetime) -> str:
+    pad = 10 if h.lead_min <= 30 else 15 if h.lead_min <= 60 else 20
+    snap = lambda d: d - timedelta(minutes=d.minute % 5, seconds=d.second, microseconds=d.microsecond)
+    start = max(snap(h.when_utc - timedelta(minutes=pad)), snap(now_utc))
+    end = snap(h.when_utc + timedelta(minutes=pad))
+    s, e = start.astimezone(IST), end.astimezone(IST)
+    st, et = s.strftime("%I:%M").lstrip("0"), e.strftime("%I:%M").lstrip("0")
+    if s.strftime("%p") == e.strftime("%p"):
+        return f"{st}-{et} {e.strftime('%p')}"
+    return f"{st} {s.strftime('%p')}-{et} {e.strftime('%p')}"
+
+
 # --- reading the export --------------------------------------------------------
 @dataclass
 class Export:
@@ -435,11 +450,15 @@ def _mins(now, then):
     return (now - then).total_seconds() / 60.0 if then else 1e9
 
 
-def decide(hits: list[Hit], state: dict, now_utc: datetime) -> tuple[str, str, set]:
+def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = None, max_per_hour: int = None,
+           vh_exception: bool = True, district_gap: float = None) -> tuple[str, str, set]:
     """("send"|"skip", reason, names of regions that are new or upgraded).
     Mutates state only for bookkeeping that does not depend on whether a post
     went out (last hit time, episode end); the caller records the post itself
     once it succeeded."""
+    global_gap = GLOBAL_MIN_GAP_MIN if global_gap is None else global_gap
+    max_per_hour = MAX_POSTS_PER_HOUR if max_per_hour is None else max_per_hour
+    district_gap = DISTRICT_MIN_GAP_MIN if district_gap is None else district_gap
     regs = state.setdefault("regions", {})
     hit_names = {h.name for h in hits}
     for h in hits:
@@ -459,23 +478,23 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime) -> tuple[str, str, s
         rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
         if not st.get("active"):
             new.append(h.name); changed.add(h.name)
-            if rank == 3:
+            if rank == 3 and vh_exception:
                 vh.append(h.name)
             continue
         went_over = h.status == "over" and st.get("last_status") == "approaching"
-        if rank == 3 and st.get("last_rank", 0) < 3:       # turned Very heavy: never held back
+        if rank == 3 and st.get("last_rank", 0) < 3 and vh_exception:       # turned Very heavy: never held back
             upgraded.append(h.name); changed.add(h.name); vh.append(h.name)
-        elif (went_over or rank > st.get("last_rank", 0)) and _mins(now_utc, _dt(st.get("last_post"))) >= DISTRICT_MIN_GAP_MIN:
+        elif (went_over or rank > st.get("last_rank", 0)) and _mins(now_utc, _dt(st.get("last_post"))) >= district_gap:
             upgraded.append(h.name); changed.add(h.name)
     if not changed:
         return "skip", f"already alerted for the {len(hits)} active region(s)", set()
     if vh:
         return "send", f"VERY HEAVY: {', '.join(vh)} ({len(new)} new, {len(upgraded)} upgraded)", changed
     gap = _mins(now_utc, _dt(state.get("last_post_utc")))
-    if gap < GLOBAL_MIN_GAP_MIN:
-        return "skip", f"{len(changed)} change(s) waiting, last post was {gap:.0f} min ago (< {GLOBAL_MIN_GAP_MIN})", set()
+    if gap < global_gap:
+        return "skip", f"{len(changed)} change(s) waiting, last post was {gap:.0f} min ago (< {global_gap:.0f})", set()
     recent = [t for t in state.get("post_times", []) if _mins(now_utc, _dt(t)) < 60]
-    if len(recent) >= MAX_POSTS_PER_HOUR:
+    if len(recent) >= max_per_hour:
         return "skip", f"{len(changed)} change(s) waiting, {len(recent)} posts already in the last hour", set()
     today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
     if MAX_POSTS_PER_DAY is not None and state.get("posts", {}).get(today, 0) >= MAX_POSTS_PER_DAY:
@@ -671,14 +690,15 @@ def fit_caption(text: str, details: str, disclaimer: str = None, limit: int = CA
         dropped += 1
 
 
-def build_details(listed: list[Hit], all_ordered: list[Hit]) -> str:
+def build_details(listed: list[Hit], all_ordered: list[Hit], exp_time: datetime = None) -> str:
     """Per district: the category of the spell and the estimated timeline (when it starts and
     roughly how long it may last). No dBZ or node counts (those stay in the decision log)."""
+    exp_time = exp_time or datetime.now(timezone.utc)
     now_ = sorted((h for h in listed if h.status == "over"), key=lambda h: (-category(h), -h.nodes))
     soon = sorted((h for h in listed if h.status == "approaching"), key=lambda h: (h.lead_min, -category(h)))
     lines = [f"- {h.name} Dt.: {CATEGORY_NAME[category(h)]} spell of rains now" for h in now_]
-    lines += [f"- {h.name} Dt.: rainbands approaching; {CATEGORY_NAME[category(h)]} spell of rains likely in about {h.lead_min} min "
-              f"(~{fmt_time(h.when_utc)})" for h in soon]
+    lines += [f"- {h.name} Dt.: rainbands approaching; {CATEGORY_NAME[category(h)]} spell of rains likely between "
+              f"{window_text(h, exp_time)}" for h in soon]
     rest = [h.name for h in sorted((h for h in all_ordered if h not in listed),
                                    key=lambda h: (h.status != "over", h.lead_min))]
     if rest:
@@ -1004,7 +1024,7 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
         if not (0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0):
             continue                 # outside this panel's view
         label = (f"{h.name}\n{CATEGORY_NAME[category(h)]}" if h.status == "over"
-                 else f"{h.name}\n{CATEGORY_NAME[category(h)]}\n~{fmt_time(h.when_utc)}")
+                 else f"{h.name}\n{CATEGORY_NAME[category(h)]}\n{window_text(h, exp.generated_utc)}")
         fs = 12.5
         offs = [(0, -0.075), (0, 0.075), (0.2, 0), (-0.2, 0), (0.2, -0.075), (-0.2, -0.075), (0.2, 0.075), (-0.2, 0.075),
                 (0, -0.16), (0, 0.16)]
@@ -1025,7 +1045,9 @@ def render_image(exp: Export, hits: list[Hit], path: Path, tile_url: str | None 
     for sp in ax.spines.values():
         sp.set_linewidth(1.5)
 
-    where = "Chennai" if all(h.name == "Chennai" for h in hits) else "Tamil Nadu and Puducherry"
+    where = ("Chennai" if all(h.name == "Chennai" for h in hits) else
+             "Chennai and neighbouring districts" if all(h.name in ("Chennai", "Tiruvallur", "Chengalpattu", "Kancheepuram") for h in hits)
+             else "Tamil Nadu and Puducherry")
     fig.suptitle("Experimental Rainfall Nowcast based on IMD Radar", fontsize=15.5, fontweight="bold", y=0.985)
     ax.set_title(f"{where}: rainbands\nColours: now {fmt_time(exp.generated_utc)}   Dashed: ~"
                  f"{fmt_time(exp.generated_utc + timedelta(minutes=lead_then))}"
@@ -1188,6 +1210,45 @@ def _prune_drafts(folder: Path) -> None:
                 pass
 
 
+# --- public platforms --------------------------------------------------------------------
+PUBLIC_POSTING = True                       # set False to switch the whole public-posting step off
+PUBLIC_REGIONS = ("Chennai", "Tiruvallur", "Chengalpattu", "Kancheepuram")
+PUBLIC_MIN_GAP_MIN = 60                     # at most one public post in any 60 minutes
+X_DISCLAIMER = "Experimental automated nowcast from IMD radar. Not an official forecast."
+
+
+def _public_cycle(a: "Assessment", exp: Export, state: dict, entry: dict, now_utc: datetime, tile_url) -> None:
+    import social_publish
+    pub = state.setdefault("public", {})
+    ph = [h for h in a.hits if h.name in PUBLIC_REGIONS]
+    action, reason, changed = decide(ph, pub, now_utc, global_gap=PUBLIC_MIN_GAP_MIN, max_per_hour=1,
+                                     vh_exception=False, district_gap=PUBLIC_MIN_GAP_MIN)
+    info = {"action": action, "reason": reason}
+    if action == "send":
+        ordered = order_hits(ph, changed)
+        text, listed = build_text(ordered, exp)
+        stamp = now_utc.astimezone(IST).strftime("%Y%m%d_%H%M%S")
+        drafts = Path("state_social_test/drafts")
+        drafts.mkdir(parents=True, exist_ok=True)
+        image = None
+        try:
+            png = render_images(exp, ordered, drafts / f"{stamp}_public.png", tile_url)
+            image = png[0] if isinstance(png, (list, tuple)) and png else png
+        except Exception as e:
+            print(f"[social] public image failed, posting text only: {e!r}")
+        x_text = social_publish.fit_x_text(text, X_DISCLAIMER, HASHTAGS)
+        fb_text = f"{text}\n\n{DISCLAIMER}"
+        res = social_publish.publish(x_text, fb_text, image, stamp)
+        info.update(mode=res["mode"], x=res["x"], facebook=res["facebook"], listed=[h.name for h in listed], text=text)
+        if res["any_ok"]:
+            regs = pub.setdefault("regions", {})
+            for h in ph:
+                regs[h.name].update(active=True, last_post=now_utc.isoformat(), last_status=h.status, last_rank=category(h))
+            pub["last_post_utc"] = now_utc.isoformat()
+            pub["post_times"] = [t for t in pub.get("post_times", []) if _mins(now_utc, _dt(t)) < 120] + [now_utc.isoformat()]
+    entry["public"] = info
+
+
 def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         sender=send_telegram, tile_url: str | None = None, force: bool = False) -> dict:
     """One cycle. Returns what it decided (also appended to decision_log.jsonl).
@@ -1260,7 +1321,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         except Exception as e:
             print(f"[social] image failed, sending text only: {e!r}")
         ordered = order_hits(a.hits, changed)
-        details = build_details(listed, ordered)
+        details = build_details(listed, ordered, exp.generated_utc)
         caption = fit_caption(text, details if SHOW_DISTRICT_LINES else "")
         (drafts / f"{stamp}.txt").write_text(text + "\n")
         _prune_drafts(drafts)
@@ -1283,6 +1344,15 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
                 del posts[k]
     else:
         print(f"[social] no post: {reason}")
+
+    # ---- X (Twitter) and the Facebook Page (18 Oct 2026): only Chennai / Tiruvallur / Chengalpattu / Kancheepuram, at most one post
+    # an hour, no Very heavy exception, own state; independent of Telegram. Dry run until PUBLIC_POST_ENABLED=true (social_publish.py).
+    if a.ok and not force and PUBLIC_POSTING:
+        try:
+            _public_cycle(a, exp, state, entry, now_utc, tile_url)
+        except Exception as e:
+            entry["public"] = {"action": "error", "reason": f"{type(e).__name__}: {e}"[:200]}
+            print(f"[social] public posting failed (Telegram and the map are unaffected): {e!r}")
 
     state_path.write_text(json.dumps(state, indent=1))
     _append_log(log_path, entry)
