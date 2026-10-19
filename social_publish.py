@@ -160,11 +160,11 @@ def fb_page_token(notes: list | None = None) -> str | None:
     if typ != "USER":
         notes.append(f"FB_PAGE_TOKEN is not a usable token (type {typ or 'unknown'}, length {len(given)})")
         return stored
-    app_id = os.environ.get("FB_APP_ID", "").strip() or FB_APP_ID_DEFAULT
-    if str(info.get("app_id")) != app_id:
-        notes.append(f"FB_PAGE_TOKEN is a user token from ANOTHER app ({info.get('app_name') or info.get('app_id')}); "
-                     f"select 'COMK Nowcast Automated Alert' under Meta App in the Explorer before Generate Access Token")
-        return stored
+    # The exchange must use the app that issued the token (its secret must be FB_APP_SECRET).
+    app_id = str(info.get("app_id") or os.environ.get("FB_APP_ID", "").strip() or FB_APP_ID_DEFAULT)
+    notes.append(f"user token issued by app {info.get('application') or ''} ({app_id}), "
+                 f"expires {datetime.fromtimestamp(info['expires_at'], timezone.utc):%H:%M UTC}" if info.get("expires_at") else
+                 f"user token issued by app {app_id}")
     secret = os.environ.get("FB_APP_SECRET", "").strip()
     if not secret:
         notes.append("FB_PAGE_TOKEN is a user token; add the FB_APP_SECRET secret so it can be converted")
@@ -172,7 +172,8 @@ def fb_page_token(notes: list | None = None) -> str | None:
     ok, j = _fb_get("oauth/access_token", grant_type="fb_exchange_token", client_id=app_id, client_secret=secret,
                     fb_exchange_token=given)
     if not ok or "access_token" not in j:
-        notes.append(f"exchange for a long-lived user token failed: {(j.get('error') or {}).get('message', j)}"[:300])
+        notes.append(f"exchange for a long-lived user token failed (is FB_APP_SECRET the secret of app {app_id}?): "
+                     f"{(j.get('error') or {}).get('message', j)}"[:300])
         return stored
     ok, j = _fb_get(page, fields="access_token", access_token=j["access_token"])
     if not ok or "access_token" not in j:
