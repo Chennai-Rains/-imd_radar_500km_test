@@ -590,7 +590,11 @@ PRODUCTS = {
         "min_swatch_rows": 2,
         "role": "aloft_early_warning",
         "range_km": 150.0,
-        "max_range_km": 135.0,
+        # 98 km (was 135, 19 Oct 2026): beyond 100 km the land is the Eastern Ghats hill shading (Tirupati, Chittoor,
+        # Vellore), and its pale yellows ARE legend colours (20-24 dBZ), so no colour rule can separate them from rain.
+        # Over 74 frames (13-19 Oct) land echo >= 20 dBZ was 0.00 % of pixels inside 100 km and ~4 % beyond -- all
+        # shading. cni_maxz (250 km, clean over those hills) covers 98 km onwards, on the map and in the alert grid.
+        "max_range_km": 98.0,
         "elevation_deg": 0.2,
         "image_size": (1019, 800),
         "site_px": (375.7, 393.3),
@@ -607,10 +611,17 @@ PRODUCTS = {
         "exclude_colors": [
             (102, 204, 255), (153, 204, 255), (102, 153, 255), (153, 153, 255),
             (102, 153, 204), (102, 204, 204), (153, 153, 204), (153, 204, 204),
+            # 19 Oct 2026: olive (204,204,102) is the hill shading west of ~79.7E (Tirupati, Chittoor, Vellore); a dither
+            # speck in the colour bar gave it a LUT entry, so it read as 30 dBZ and drew a false "ring" 100-130 km west
+            # of Chennai on the map. Over 37 frames (13-19 Oct): ~716,000 px on the western hills, 353 over the sea.
+            (204, 204, 102),
         ],
         "label_exclude_boxes": [
             (705, 685, 799, 800),   # national emblem/seal, bottom-right of the plan view
         ],
+        # Range rings and lat/lon grid lines read as >= 20 dBZ in most frames: every pixel that did so in >= 25 % of
+        # 222 frames (13-19 Oct 2026), grown 1 px. Fixed geometry, so a fixed mask; rain never sits on one pixel that long.
+        "static_exclude_mask": "masks/cni_ppi_static_exclude.png",
     },
     "cni_ppz": {
         "url": "https://mausam.imd.gov.in/Radar/ppz_cni.gif",
