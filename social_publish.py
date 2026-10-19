@@ -27,6 +27,9 @@ X_POST_URL = "https://api.x.com/2/tweets"
 X_MEDIA_URL = "https://api.x.com/2/media/upload"
 FB_GRAPH_VERSION = os.environ.get("FB_GRAPH_VERSION", "v25.0")
 X_LIMIT = 280
+# Paused 19 Oct 2026: the Meta app is still in development mode (going live needs business verification), so its posts
+# are visible only to the app's admins. Set True once the app is live (or posting goes through another route).
+FACEBOOK_ENABLED = False
 DRAFT_DIR = Path("state_social_test/public_drafts")
 STATUS_FILE = Path("state_social_test/public_last.json")
 
@@ -237,7 +240,7 @@ def publish(x_text: str, fb_text: str, image: Path | None, stamp: str) -> dict:
         res["facebook"] = [True, "dry run"]
     else:
         res["x"] = list(post_x(x_text, image))
-        res["facebook"] = list(post_facebook(fb_text, image))
+        res["facebook"] = list(post_facebook(fb_text, image)) if FACEBOOK_ENABLED else [False, "Facebook paused (app not live)"]
     res["any_ok"] = bool(res["x"][0] or res["facebook"][0])
     _record({k: v for k, v in res.items()})
     return res
