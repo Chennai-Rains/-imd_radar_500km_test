@@ -157,3 +157,47 @@ def send_test_x() -> tuple[bool, str]:
     _record({"mode": "manual_test_x", "x": [ok, detail]})
     print(f"[public] X test post: {'OK' if ok else 'FAILED'} - {detail}")
     return ok, detail
+
+
+def check_facebook() -> tuple[bool, str]:
+    """Manual check (workflow input send_test_facebook) that leaves NOTHING visible on the Page: reads the Page name with
+    the token, uploads a small test photo as UNPUBLISHED (published=false, never shown in the feed), then deletes it.
+    Proves FB_PAGE_ID, FB_PAGE_TOKEN, the posting permission and the image upload. The outcome (never the token) goes
+    to state_social_test/public_last.json."""
+    page, token = os.environ.get("FB_PAGE_ID", "").strip(), os.environ.get("FB_PAGE_TOKEN", "").strip()
+    steps = []
+
+    def done(ok, detail):
+        _record({"mode": "manual_test_facebook", "facebook": [ok, detail], "steps": steps})
+        print(f"[public] Facebook check: {'OK' if ok else 'FAILED'} - {detail}")
+        return ok, detail
+
+    if not page or not token:
+        return done(False, f"secrets missing: FB_PAGE_ID {'set' if page else 'NOT set'}, FB_PAGE_TOKEN {'set' if token else 'NOT set'}")
+    g = f"https://graph.facebook.com/{FB_GRAPH_VERSION}"
+    try:
+        r = requests.get(f"{g}/{page}", params={"fields": "id,name", "access_token": token}, timeout=30)
+        if not r.ok:
+            return done(False, f"token cannot read the Page: HTTP {r.status_code} {r.text[:300]}")
+        steps.append(f"page ok: {r.json().get('name')} ({r.json().get('id')})")
+        r = requests.get(f"{g}/me", params={"fields": "id,name", "access_token": token}, timeout=30)
+        me = r.json() if r.ok else {}
+        steps.append(f"token belongs to: {me.get('name')} ({me.get('id')})" + ("  <- a PAGE token" if str(me.get("id")) == page else "  <- NOT the page token: use the access_token from me/accounts"))
+        from PIL import Image, ImageDraw
+        DRAFT_DIR.mkdir(parents=True, exist_ok=True)
+        img = Image.new("RGB", (600, 300), (235, 242, 250))
+        ImageDraw.Draw(img).text((30, 140), "COMK nowcast - Facebook link test (unpublished)", fill=(30, 50, 90))
+        path = DRAFT_DIR / "fb_test.png"
+        img.save(path)
+        with open(path, "rb") as fh:
+            r = requests.post(f"{g}/{page}/photos", data={"published": "false", "message": "COMK link test, unpublished",
+                                                        "access_token": token}, files={"source": fh}, timeout=60)
+        if not r.ok:
+            return done(False, f"unpublished test photo refused: HTTP {r.status_code} {r.text[:300]}")
+        pid = r.json().get("id")
+        steps.append(f"unpublished photo uploaded: {pid}")
+        r = requests.delete(f"{g}/{pid}", params={"access_token": token}, timeout=30)
+        steps.append("test photo deleted" if r.ok else f"test photo NOT deleted (it is unpublished, invisible): HTTP {r.status_code} {r.text[:200]}")
+        return done(True, "token, page and photo upload all work")
+    except Exception as e:
+        return done(False, f"request failed: {type(e).__name__}: {str(e)[:200]}")

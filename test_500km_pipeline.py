@@ -156,6 +156,14 @@ if os.environ.get("SOCIAL_TEST_X") == "true":
     except Exception as e:
         print(f"[public] X test post failed: {e!r}")
 
+# One-off check of the Facebook Page secrets (workflow input send_test_facebook): nothing is published (see check_facebook).
+if os.environ.get("SOCIAL_TEST_FB") == "true":
+    try:
+        import social_publish
+        social_publish.check_facebook()
+    except Exception as e:
+        print(f"[public] Facebook check failed: {e!r}")
+
 # Nowcast verification log (see forecast_verify.py): scores plus_30/60/90 against later observations and against
 # persistence; never affects the map or the alerts.
 try:

@@ -15,6 +15,10 @@ on:
         description: "Post ONE harmless test tweet (with an image) to the X account, to check the keys. Public if the account is public."
         type: boolean
         default: false
+      send_test_facebook:
+        description: "Check the Facebook Page secrets: uploads an UNPUBLISHED test photo and deletes it. Nothing appears on the Page."
+        type: boolean
+        default: false
       send_alert_now:
         description: "Manual trigger: post the rain spells active right now, ignoring quiet hours (11 PM-4 AM), gaps and 'already alerted'"
         type: boolean
@@ -74,6 +78,7 @@ jobs:
           SOCIAL_TEST_DRAFT: ${{ inputs.send_test_draft }}
           SOCIAL_FORCE_ALERT: ${{ inputs.send_alert_now }}
           SOCIAL_TEST_X: ${{ inputs.send_test_x }}
+          SOCIAL_TEST_FB: ${{ inputs.send_test_facebook }}
         run: python test_500km_pipeline.py
 
       - name: Rebase onto latest main before committing
