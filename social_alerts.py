@@ -1231,6 +1231,10 @@ PUBLIC_MIN_GAP_MIN = 60                     # at most one public post in any 60 
 PUBLIC_HEADER = "COMK Rainfall Nowcast"
 PUBLIC_DISCLAIMER = DISCLAIMER.replace("Experimental, automated nowcast", "Experimental Nowcast").replace("IMD radar.", "IMD Radar. Updates at most once an hour.", 1)
 X_DISCLAIMER = "Experimental Nowcast based on IMD Radar. Updates at most once an hour."
+# Facebook (19 Oct 2026): posts go to the main Chennai Rains Page, which has no automated-account label (X does), so the
+# Facebook text says so itself, in the header and the disclaimer.
+FB_HEADER = "COMK Experimental Automated Rainfall Nowcast"
+FB_DISCLAIMER = PUBLIC_DISCLAIMER.replace("Experimental Nowcast", "Experimental Automated Nowcast", 1)
 
 
 def _public_cycle(a: "Assessment", exp: Export, state: dict, entry: dict, now_utc: datetime, tile_url) -> None:
@@ -1253,7 +1257,7 @@ def _public_cycle(a: "Assessment", exp: Export, state: dict, entry: dict, now_ut
         except Exception as e:
             print(f"[social] public image failed, posting text only: {e!r}")
         x_text = social_publish.fit_x_text(text, X_DISCLAIMER, HASHTAGS)
-        fb_text = f"{text}\n\n{PUBLIC_DISCLAIMER}"
+        fb_text = f"{text.replace(PUBLIC_HEADER, FB_HEADER, 1)}\n\n{FB_DISCLAIMER}"
         res = social_publish.publish(x_text, fb_text, image, stamp)
         info.update(mode=res["mode"], x=res["x"], facebook=res["facebook"], listed=[h.name for h in listed], text=text)
         if res["any_ok"]:
