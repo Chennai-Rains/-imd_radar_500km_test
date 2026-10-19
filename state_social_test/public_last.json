@@ -1,13 +1,11 @@
 {
- "t": "2026-10-19T02:04:35+00:00",
+ "t": "2026-10-19T02:08:03+00:00",
  "mode": "manual_test_facebook",
  "facebook": [
   false,
-  "unpublished test photo refused: HTTP 403 {\"error\":{\"message\":\"(#200) Unpublished posts must be posted to a page as the page itself.\",\"type\":\"OAuthException\",\"code\":200,\"fbtrace_id\":\"ATzV20K3VoVdaEVVav-19Gt\"}}"
+  "no usable token (FB_PAGE_ID set): see steps"
  ],
  "steps": [
-  "token type: USER, profile/page id: 10165681836577288, expires: 2026-10-19 03:00 UTC, data access expires: 2027-01-17 01:59 UTC, scopes: pages_show_list, pages_read_engagement, pages_read_user_content, pages_manage_posts, pages_manage_engagement, public_profile, length 298, starts EAAc",
-  "page ok: Chennaiyil Oru Mazhaikkalam (292498517609832)",
-  "token belongs to: Srikanth Kannan (10165681836577288)  <- NOT the page token: use the access_token from me/accounts"
+  "FB_PAGE_TOKEN is a user token from ANOTHER app (1982880903023395); select 'COMK Nowcast Automated Alert' under Meta App in the Explorer before Generate Access Token"
  ]
 }
