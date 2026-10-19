@@ -1,12 +1,9 @@
 {
- "t": "2026-10-19T01:04:39+00:00",
+ "t": "2026-10-19T01:31:57+00:00",
  "mode": "manual_test_facebook",
  "facebook": [
   false,
-  "unpublished test photo refused: HTTP 403 {\"error\":{\"message\":\"(#200) Unpublished posts must be posted to a page as the page itself.\",\"type\":\"OAuthException\",\"code\":200,\"fbtrace_id\":\"AMaA7EsQK44jUoSEicckMy0\"}}"
+  "token cannot read the Page: HTTP 400 {\"error\":{\"message\":\"Malformed access token\",\"type\":\"OAuthException\",\"code\":190,\"fbtrace_id\":\"A0KIohVvsNKpdwBrth4f3OV\"}}"
  ],
- "steps": [
-  "page ok: Chennaiyil Oru Mazhaikkalam (292498517609832)",
-  "token belongs to: Srikanth Kannan (10165681515812288)  <- NOT the page token: use the access_token from me/accounts"
- ]
+ "steps": []
 }
