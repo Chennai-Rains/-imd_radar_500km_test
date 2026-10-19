@@ -75,6 +75,7 @@ jobs:
           X_ACCESS_SECRET: ${{ secrets.X_ACCESS_SECRET }}
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
+          FB_APP_SECRET: ${{ secrets.FB_APP_SECRET }}
           SOCIAL_TEST_DRAFT: ${{ inputs.send_test_draft }}
           SOCIAL_FORCE_ALERT: ${{ inputs.send_alert_now }}
           SOCIAL_TEST_X: ${{ inputs.send_test_x }}

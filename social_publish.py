@@ -102,8 +102,109 @@ def post_x(text: str, image: Path | None) -> tuple[bool, str]:
         return False, f"X request failed: {type(e).__name__}"
 
 
+FB_APP_ID_DEFAULT = "2428462281026408"          # COMK Nowcast Automated Alert (public, not a secret)
+FB_TOKEN_STORE = Path("state_social_test/fb_page_token.enc")   # the page token, ENCRYPTED with FB_APP_SECRET (public repo)
+
+
+def _fernet():
+    secret = os.environ.get("FB_APP_SECRET", "").strip()
+    if not secret:
+        return None
+    from cryptography.fernet import Fernet
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(("comk-fb-token|" + secret).encode()).digest()))
+
+
+def _fb_get(path, **params):
+    r = requests.get(f"https://graph.facebook.com/{FB_GRAPH_VERSION}/{path}", params=params, timeout=30)
+    try:
+        return r.ok, r.json()
+    except ValueError:
+        return r.ok, {"error": {"message": r.text[:200]}}
+
+
+def _token_info(token: str) -> dict:
+    ok, j = _fb_get("debug_token", input_token=token, access_token=token)
+    return j.get("data", {}) if ok else {}
+
+
+def _stored_token() -> str | None:
+    f = _fernet()
+    if not f or not FB_TOKEN_STORE.exists():
+        return None
+    try:
+        return f.decrypt(FB_TOKEN_STORE.read_bytes()).decode()
+    except Exception:
+        return None
+
+
+def fb_page_token(notes: list | None = None) -> str | None:
+    """The token to post with. Preference: the stored (encrypted) never-expiring page token; else FB_PAGE_TOKEN as it is
+    if it is already a page token; else, when FB_PAGE_TOKEN is a USER token of this app and FB_APP_SECRET is set, convert it
+    once (short-lived user -> long-lived user -> page token, which then never expires) and store it encrypted."""
+    notes = notes if notes is not None else []
+    page = os.environ.get("FB_PAGE_ID", "").strip()
+    given = os.environ.get("FB_PAGE_TOKEN", "").strip()
+    stored = _stored_token()
+    if stored and not (given and given.startswith("EAA") and _given_is_new(given)):
+        notes.append("using the stored page token")
+        return stored
+    if not given:
+        notes.append("FB_PAGE_TOKEN not set")
+        return stored
+    info = _token_info(given)
+    typ = (info.get("type") or "").upper()
+    if typ == "PAGE":
+        notes.append("FB_PAGE_TOKEN is already a page token")
+        _store(given, given, notes)
+        return given
+    if typ != "USER":
+        notes.append(f"FB_PAGE_TOKEN is not a usable token (type {typ or 'unknown'}, length {len(given)})")
+        return stored
+    app_id = os.environ.get("FB_APP_ID", "").strip() or FB_APP_ID_DEFAULT
+    if str(info.get("app_id")) != app_id:
+        notes.append(f"FB_PAGE_TOKEN is a user token from ANOTHER app ({info.get('app_name') or info.get('app_id')}); "
+                     f"select 'COMK Nowcast Automated Alert' under Meta App in the Explorer before Generate Access Token")
+        return stored
+    secret = os.environ.get("FB_APP_SECRET", "").strip()
+    if not secret:
+        notes.append("FB_PAGE_TOKEN is a user token; add the FB_APP_SECRET secret so it can be converted")
+        return stored
+    ok, j = _fb_get("oauth/access_token", grant_type="fb_exchange_token", client_id=app_id, client_secret=secret,
+                    fb_exchange_token=given)
+    if not ok or "access_token" not in j:
+        notes.append(f"exchange for a long-lived user token failed: {(j.get('error') or {}).get('message', j)}"[:300])
+        return stored
+    ok, j = _fb_get(page, fields="access_token", access_token=j["access_token"])
+    if not ok or "access_token" not in j:
+        notes.append(f"getting the page token failed: {(j.get('error') or {}).get('message', j)}"[:300])
+        return stored
+    notes.append("converted the user token into a page token")
+    _store(j["access_token"], given, notes)
+    return j["access_token"]
+
+
+_GIVEN_MARK = Path("state_social_test/fb_token_source.sha")
+
+
+def _given_is_new(given: str) -> bool:
+    """True when FB_PAGE_TOKEN changed since the stored page token was made (the user pasted a new one)."""
+    h = hashlib.sha256(("comk|" + given).encode()).hexdigest()
+    return not (_GIVEN_MARK.exists() and _GIVEN_MARK.read_text().strip() == h)
+
+
+def _store(page_token: str, given: str, notes: list) -> None:
+    f = _fernet()
+    if not f:
+        notes.append("not stored: FB_APP_SECRET not set")
+        return
+    FB_TOKEN_STORE.parent.mkdir(parents=True, exist_ok=True)
+    FB_TOKEN_STORE.write_bytes(f.encrypt(page_token.encode()))
+    _GIVEN_MARK.write_text(hashlib.sha256(("comk|" + given).encode()).hexdigest() + "\n")
+    notes.append("page token stored (encrypted)")
+
+
 def post_facebook(text: str, image: Path | None) -> tuple[bool, str]:
-    page, token = os.environ.get("FB_PAGE_ID", "").strip(), os.environ.get("FB_PAGE_TOKEN", "").strip()
+    page, token = os.environ.get("FB_PAGE_ID", "").strip(), fb_page_token()
     if not page or not token:
         return False, "Facebook credentials not set"
     try:
@@ -164,8 +265,8 @@ def check_facebook() -> tuple[bool, str]:
     the token, uploads a small test photo as UNPUBLISHED (published=false, never shown in the feed), then deletes it.
     Proves FB_PAGE_ID, FB_PAGE_TOKEN, the posting permission and the image upload. The outcome (never the token) goes
     to state_social_test/public_last.json."""
-    page, token = os.environ.get("FB_PAGE_ID", "").strip(), os.environ.get("FB_PAGE_TOKEN", "").strip()
     steps = []
+    page, token = os.environ.get("FB_PAGE_ID", "").strip(), fb_page_token(steps)
 
     def done(ok, detail):
         _record({"mode": "manual_test_facebook", "facebook": [ok, detail], "steps": steps})
@@ -173,7 +274,7 @@ def check_facebook() -> tuple[bool, str]:
         return ok, detail
 
     if not page or not token:
-        return done(False, f"secrets missing: FB_PAGE_ID {'set' if page else 'NOT set'}, FB_PAGE_TOKEN {'set' if token else 'NOT set'}")
+        return done(False, f"no usable token (FB_PAGE_ID {'set' if page else 'NOT set'}): see steps")
     g = f"https://graph.facebook.com/{FB_GRAPH_VERSION}"
     try:
         try:   # a token may inspect itself: type, expiry, scopes (never the token itself)
