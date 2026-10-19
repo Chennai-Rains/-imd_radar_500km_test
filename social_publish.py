@@ -176,6 +176,15 @@ def check_facebook() -> tuple[bool, str]:
         return done(False, f"secrets missing: FB_PAGE_ID {'set' if page else 'NOT set'}, FB_PAGE_TOKEN {'set' if token else 'NOT set'}")
     g = f"https://graph.facebook.com/{FB_GRAPH_VERSION}"
     try:
+        try:   # a token may inspect itself: type, expiry, scopes (never the token itself)
+            dj = requests.get(f"{g}/debug_token", params={"input_token": token, "access_token": token}, timeout=30).json().get("data", {})
+            def _when(ts):
+                return "never" if not ts else datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            steps.append(f"token type: {dj.get('type')}, profile/page id: {dj.get('profile_id') or dj.get('user_id')}, "
+                         f"expires: {_when(dj.get('expires_at'))}, data access expires: {_when(dj.get('data_access_expires_at'))}, "
+                         f"scopes: {', '.join(dj.get('scopes', []))}, length {len(token)}, starts {token[:4]}")
+        except Exception as e:
+            steps.append(f"token self-inspection failed: {type(e).__name__}")
         r = requests.get(f"{g}/{page}", params={"fields": "id,name", "access_token": token}, timeout=30)
         if not r.ok:
             return done(False, f"token cannot read the Page: HTTP {r.status_code} {r.text[:300]}")
