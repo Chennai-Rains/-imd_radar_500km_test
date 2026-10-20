@@ -295,6 +295,7 @@ class Hit:
     core45: int = 0            # most nodes at/above CORE_DBZ at any lead (a real core, not one spike)
     end_lead: int = 0          # last lead (min) at which the region still holds strong echo
     vh_ok: bool = True         # Very heavy allowed: seen as intense in the previous cycle too, and not a small (< min_nodes) cell
+    heavy_ok: bool = True      # Heavy allowed: the district looked Heavy in the previous cycle too (20 Oct 2026)
 
 
 @dataclass
@@ -308,6 +309,7 @@ class Assessment:
     weak: list = field(default_factory=list)       # districts with >= PERSIST_NODES strong nodes at some lead (for next cycle's persistence test)
     intense: list = field(default_factory=list)    # districts that look Very heavy this cycle (confirmed or not), for next cycle's confirmation
     persisted: list = field(default_factory=list)  # hits that exist only because the same small cell was also seen last cycle
+    heavy: list = field(default_factory=list)      # districts that look Heavy this cycle (confirmed or not), for next cycle's confirmation
 
 
 OFFSHORE_MAX_KM = 25.0     # a band that is still over the sea is only announced once it is this close to the district
@@ -368,7 +370,8 @@ def _offshore_only(exp: Export, reg: Region, idx0: int) -> bool:
     return not (d_land <= LAND_NEAR_KM or d_sea <= OFFSHORE_MAX_KM)
 
 
-def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, prev_weak: set | None = None, prev_vh: set | None = None) -> Assessment:
+def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, prev_weak: set | None = None, prev_vh: set | None = None,
+           prev_heavy: set | None = None) -> Assessment:
     doc = exp.doc
     age = (now_utc - exp.generated_utc).total_seconds() / 60.0
     if age > MAX_EXPORT_AGE_MIN:
@@ -392,7 +395,7 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, 
         idx = [(0, exp.layer_names.index("observed"))]
     idx.sort()
 
-    hits, uncovered, offshore, weak, persisted, intense = [], [], [], [], [], []
+    hits, uncovered, offshore, weak, persisted, intense, heavy = [], [], [], [], [], [], []
     prev_weak = prev_weak or set()
     for reg in regions:
         first_layer = exp.grid[idx[0][1]][reg.rs, reg.cs][reg.sub]
@@ -426,6 +429,11 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, 
                 persisted.append(reg.name)
             h = Hit(reg.name, "over" if first == 0 else "approaching", first, max_dbz, nodes_first,
                     exp.generated_utc + timedelta(minutes=first), cen[0], cen[1], core, last)
+            if is_heavy_raw(h):
+                heavy.append(reg.name)
+                # Heavy must show in two cycles running (20 Oct 2026, user's choice): cores pulsing around 45 dBZ made
+                # the label flip Heavy -> Moderate -> Heavy every scan (NIOT 6:08-6:46 AM: 48, 38, 51, 39 dBZ over Chennai).
+                h.heavy_ok = prev_heavy is None or reg.name in prev_heavy
             if is_intense(h):
                 intense.append(reg.name)
                 # Very heavy is the claim we must not get wrong: the district has to have looked Very heavy in
@@ -433,7 +441,7 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, 
                 # size one, not a 6-7 node cell let in by the small-cell rule.
                 h.vh_ok = nodes_first >= reg.min_nodes and (prev_vh is None or reg.name in prev_vh)
             hits.append(h)
-    return Assessment(True, "ok", hits, uncovered, offshore, len(regions), weak, intense, persisted)
+    return Assessment(True, "ok", hits, uncovered, offshore, len(regions), weak, intense, persisted, heavy)
 
 
 # --- episode / dedup state ---------------------------------------------------------
@@ -604,9 +612,14 @@ def category(h: Hit) -> int:
     """1 Moderate, 2 Heavy, 3 Very heavy spell of rain (3 only while VERY_HEAVY_ENABLED)."""
     if VERY_HEAVY_ENABLED and is_intense(h) and h.vh_ok:
         return 3
-    if h.max_dbz >= HEAVY_DBZ and h.core45 >= HEAVY_CORE_NODES:
+    if is_heavy_raw(h) and h.heavy_ok:
         return 2
     return 1
+
+
+def is_heavy_raw(h: Hit) -> bool:
+    """Heavy-looking this cycle, before the two-cycle confirmation."""
+    return h.max_dbz >= HEAVY_DBZ and h.core45 >= HEAVY_CORE_NODES
 
 
 DISCLAIMER = ("Disclaimer: Experimental, automated nowcast based on IMD radar. The above alert is subject to storms "
@@ -1289,10 +1302,13 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
     prev_weak = set(ws.get("names", [])) if _mins(now_utc, _dt(ws.get("t"))) <= PERSIST_MAX_AGE_MIN else set()
     vs = state.get("vh_seen") or {}
     prev_vh = set(vs.get("names", [])) if _mins(now_utc, _dt(vs.get("t"))) <= PERSIST_MAX_AGE_MIN else set()
-    a = assess(exp, now_utc, prev_weak=prev_weak, prev_vh=prev_vh) if exp is not None else Assessment(False, err)
+    hs = state.get("heavy_seen") or {}
+    prev_heavy = set(hs.get("names", [])) if _mins(now_utc, _dt(hs.get("t"))) <= PERSIST_MAX_AGE_MIN else set()
+    a = assess(exp, now_utc, prev_weak=prev_weak, prev_vh=prev_vh, prev_heavy=prev_heavy) if exp is not None else Assessment(False, err)
     if a.ok:
         state["weak_seen"] = {"t": now_utc.isoformat(), "names": a.weak}
         state["vh_seen"] = {"t": now_utc.isoformat(), "names": a.intense}
+        state["heavy_seen"] = {"t": now_utc.isoformat(), "names": a.heavy}
 
     quiet_held = []
     if a.ok and not force and in_quiet_hours(now_utc):
@@ -1320,6 +1336,9 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         entry["no_coverage"] = len(a.uncovered)
     if quiet_held:
         entry["quiet_held"] = quiet_held       # 23:00-03:59 IST: below Very heavy, not announced
+    h_unconf = [h.name for h in a.hits if is_heavy_raw(h) and not h.heavy_ok]
+    if h_unconf:
+        entry["heavy_unconfirmed"] = h_unconf   # looked Heavy this cycle only: announced as Moderate until the next cycle agrees
     unconf = [h.name for h in a.hits if is_intense(h) and not h.vh_ok]
     if unconf:
         entry["vh_unconfirmed"] = unconf        # looked Very heavy but not yet confirmed (second cycle / full-size cell): announced as Heavy at most
