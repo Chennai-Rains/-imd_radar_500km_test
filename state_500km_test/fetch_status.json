@@ -1,58 +1,58 @@
 {
  "caz_plk.gif": {
-  "t": "2026-10-20 21:51:04",
-  "result": "ok",
-  "http": 200,
-  "last_modified": "Tue, 20 Oct 2026 21:50:11 GMT",
-  "bytes": 1500787,
-  "error": null
- },
- "caz_kkl.gif": {
-  "t": "2026-10-20 21:51:13",
-  "result": "ok",
-  "http": 200,
-  "last_modified": "Tue, 20 Oct 2026 21:50:03 GMT",
-  "bytes": 140928,
-  "error": null
- },
- "ppz_kkl.gif": {
-  "t": "2026-10-20 21:51:18",
-  "result": "ok",
-  "http": 200,
-  "last_modified": "Tue, 20 Oct 2026 21:50:03 GMT",
-  "bytes": 145814,
-  "error": null
- },
- "caz_cni.gif": {
-  "t": "2026-10-20 21:51:23",
-  "result": "ok",
-  "http": 200,
-  "last_modified": "Tue, 20 Oct 2026 21:50:03 GMT",
-  "bytes": 290650,
-  "error": null
- },
- "ppi_cni.gif": {
-  "t": "2026-10-20 21:51:28",
-  "result": "ok",
-  "http": 200,
-  "last_modified": "Tue, 20 Oct 2026 21:49:38 GMT",
-  "bytes": 414669,
-  "error": null
- },
- "caz_mlr.gif": {
-  "t": "2026-10-20 21:51:33",
-  "result": "ok",
-  "http": 200,
-  "last_modified": "Tue, 20 Oct 2026 21:50:07 GMT",
-  "bytes": 395535,
-  "error": null
- },
- "ppi_tvm.gif": {
-  "t": "2026-10-20 21:51:54",
+  "t": "2026-10-20 21:56:23",
   "result": "failed",
   "http": null,
   "last_modified": null,
   "bytes": 0,
-  "error": "HTTPSConnectionPool(host='mausam.imd.gov.in', port=443): Max retries exceeded with url: /Radar/ppi_tvm.gif?_=1792533093 (Caused by ConnectTimeoutError(<HTTPSCon"
+  "error": "HTTPSConnectionPool(host='mausam.imd.gov.in', port=443): Read timed out. (read timeout=20)"
+ },
+ "caz_kkl.gif": {
+  "t": "2026-10-20 21:56:47",
+  "result": "failed",
+  "http": null,
+  "last_modified": null,
+  "bytes": 0,
+  "error": "HTTPSConnectionPool(host='mausam.imd.gov.in', port=443): Max retries exceeded with url: /Radar/caz_kkl.gif?_=1792533386 (Caused by ConnectTimeoutError(<HTTPSCon"
+ },
+ "ppz_kkl.gif": {
+  "t": "2026-10-20 21:57:07",
+  "result": "failed",
+  "http": null,
+  "last_modified": null,
+  "bytes": 0,
+  "error": "HTTPSConnectionPool(host='mausam.imd.gov.in', port=443): Max retries exceeded with url: /Radar/ppz_kkl.gif?_=1792533407 (Caused by ConnectTimeoutError(<HTTPSCon"
+ },
+ "caz_cni.gif": {
+  "t": "2026-10-20 21:57:28",
+  "result": "failed",
+  "http": null,
+  "last_modified": null,
+  "bytes": 0,
+  "error": "HTTPSConnectionPool(host='mausam.imd.gov.in', port=443): Max retries exceeded with url: /Radar/caz_cni.gif?_=1792533427 (Caused by ConnectTimeoutError(<HTTPSCon"
+ },
+ "ppi_cni.gif": {
+  "t": "2026-10-20 21:57:48",
+  "result": "failed",
+  "http": null,
+  "last_modified": null,
+  "bytes": 0,
+  "error": "HTTPSConnectionPool(host='mausam.imd.gov.in', port=443): Read timed out. (read timeout=20)"
+ },
+ "caz_mlr.gif": {
+  "t": "2026-10-20 21:57:54",
+  "result": "ok",
+  "http": 200,
+  "last_modified": "Tue, 20 Oct 2026 21:56:00 GMT",
+  "bytes": 395535,
+  "error": null
+ },
+ "ppi_tvm.gif": {
+  "t": "2026-10-20 21:58:03",
+  "result": "ok",
+  "http": 200,
+  "last_modified": "Tue, 20 Oct 2026 21:49:39 GMT",
+  "bytes": 49336,
+  "error": null
  }
 }
