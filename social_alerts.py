@@ -82,10 +82,16 @@ MAX_RADAR_AGE_MIN = 40     # freshest radar frame older than this -> nowcast is 
 MIN_REGION_COVERAGE = 0.5  # share of a region inside radar coverage; no coverage != dry, so stay quiet there
 
 # --- how often ----------------------------------------------------------------
-CLEAR_AFTER_MIN = 30       # a region must be quiet this long before a new storm there is a NEW episode
-DISTRICT_MIN_GAP_MIN = 60  # a district already announced is updated (turned heavier / storm now over it) at most once an hour ...
-GLOBAL_MIN_GAP_MIN = 30    # minimum time between any two posts
-MAX_POSTS_PER_HOUR = 2     # strict: at most this many posts in any rolling 60 minutes ...
+# 21 Oct 2026 (user): alerts should WARN. 83 % of "over" mentions (15-20 Oct) were repeats of rain already announced, so
+# continuing rain no longer triggers a post by itself; it is carried as "continuing over ..." when a post goes out for a
+# new reason (a district newly approaching, rain newly starting over a district, or a step up to Heavy).
+CLEAR_AFTER_MIN = 60       # a region must be quiet this long before rain there is a NEW episode (was 30: pauses re-announced the same rain)
+DISTRICT_MIN_GAP_MIN = 60  # a district already announced is upgraded (Moderate -> Heavy) at most once an hour ...
+GLOBAL_MIN_GAP_MIN = 20    # minimum time between any two posts (was 30) ...
+PRIORITY_GAP_MIN = 10      # ... but a NEWLY APPROACHING district (arrival >= IMMINENT_MIN away) may post 10 min after the last post
+MAX_POSTS_PER_HOUR = 2     # at most this many posts in any rolling 60 minutes ...
+PRIORITY_MAX_PER_HOUR = 3  # ... a newly approaching district may use a third
+IMMINENT_MIN = 15          # arrival this soon: "likely to begin shortly" (the radar picture is ~30 min old; no window that fine)
 # ... EXCEPT a Very heavy spell (a district newly Very heavy, or upgraded to it), which is always announced at once
 MAX_POSTS_PER_DAY = None   # no daily cap (removed 7 Oct: it blocked the afternoon storms); set a number to re-enable
 MAX_NAMED_REGIONS = 6      # a post names at most this many; the rest become "+N more districts" (and count as announced)
@@ -471,9 +477,10 @@ def _mins(now, then):
 def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = None, max_per_hour: int = None,
            vh_exception: bool = True, district_gap: float = None, refresh_gap: float = None) -> tuple[str, str, set]:
     """("send"|"skip", reason, names of regions that are new or upgraded).
-    Mutates state only for bookkeeping that does not depend on whether a post
-    went out (last hit time, episode end); the caller records the post itself
-    once it succeeded."""
+    Triggers (21 Oct 2026): a district NEWLY approaching or NEWLY under rain (not announced in this episode), or a step up
+    in category. Rain arriving in a district already warned about, and rain simply continuing, never trigger a post on
+    their own -- they ride along as "continuing" in the next post. Mutates state only for bookkeeping that does not
+    depend on whether a post went out; the caller records the post once it succeeded."""
     global_gap = GLOBAL_MIN_GAP_MIN if global_gap is None else global_gap
     max_per_hour = MAX_POSTS_PER_HOUR if max_per_hour is None else max_per_hour
     district_gap = DISTRICT_MIN_GAP_MIN if district_gap is None else district_gap
@@ -490,36 +497,39 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
         return "skip", "no strong echo over or heading for any region", set()
 
     changed = set()
-    new, upgraded, vh = [], [], []
+    warn, new, upgraded, vh = [], [], [], []
     for h in hits:
         st = regs[h.name]
         rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
         if not st.get("active"):
-            new.append(h.name); changed.add(h.name)
+            changed.add(h.name)
+            if h.status == "approaching" and h.lead_min >= IMMINENT_MIN:
+                warn.append(h.name)
+            else:
+                new.append(h.name)
             if rank == 3 and vh_exception:
                 vh.append(h.name)
             continue
-        went_over = h.status == "over" and st.get("last_status") == "approaching"
         if rank == 3 and st.get("last_rank", 0) < 3 and vh_exception:       # turned Very heavy: never held back
             upgraded.append(h.name); changed.add(h.name); vh.append(h.name)
-        elif (went_over or rank > st.get("last_rank", 0)) and _mins(now_utc, _dt(st.get("last_post"))) >= district_gap:
+        elif rank > st.get("last_rank", 0) and _mins(now_utc, _dt(st.get("last_post"))) >= district_gap:
             upgraded.append(h.name); changed.add(h.name)
-        elif refresh_gap is not None and _mins(now_utc, _dt(st.get("last_post"))) >= refresh_gap:
-            upgraded.append(h.name); changed.add(h.name)      # echo still there an hour after the last post: rain continuing
     if not changed:
-        return "skip", f"already alerted for the {len(hits)} active region(s)", set()
+        return "skip", f"nothing new: {len(hits)} active region(s) already announced (rain continuing)", set()
+    summary = f"{len(warn)} newly approaching, {len(new)} new rain, {len(upgraded)} upgraded"
     if vh:
-        return "send", f"VERY HEAVY: {', '.join(vh)} ({len(new)} new, {len(upgraded)} upgraded)", changed
+        return "send", f"VERY HEAVY: {', '.join(vh)} ({summary})", changed
     gap = _mins(now_utc, _dt(state.get("last_post_utc")))
-    if gap < global_gap:
-        return "skip", f"{len(changed)} change(s) waiting, last post was {gap:.0f} min ago (< {global_gap:.0f})", set()
+    need_gap, cap = (min(global_gap, PRIORITY_GAP_MIN), max(max_per_hour, PRIORITY_MAX_PER_HOUR)) if warn else (global_gap, max_per_hour)
+    if gap < need_gap:
+        return "skip", f"{len(changed)} change(s) waiting, last post was {gap:.0f} min ago (< {need_gap:.0f})", set()
     recent = [t for t in state.get("post_times", []) if _mins(now_utc, _dt(t)) < 60]
-    if len(recent) >= max_per_hour:
+    if len(recent) >= cap:
         return "skip", f"{len(changed)} change(s) waiting, {len(recent)} posts already in the last hour", set()
     today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
     if MAX_POSTS_PER_DAY is not None and state.get("posts", {}).get(today, 0) >= MAX_POSTS_PER_DAY:
         return "skip", f"daily cap of {MAX_POSTS_PER_DAY} posts reached", set()
-    return "send", f"{len(new)} new, {len(upgraded)} upgraded", changed
+    return "send", summary, changed
 
 
 # --- the wording -----------------------------------------------------------------------
@@ -554,7 +564,7 @@ def overall_motion(exp: Export, hits: list[Hit]) -> str:
 def order_hits(hits: list[Hit], changed: set) -> list[Hit]:
     """New/upgraded first (they are why we are posting), then Chennai, 'over' before
     'heading for', then strongest."""
-    return sorted(hits, key=lambda h: (h.name not in changed, h.name != "Chennai", h.status != "over",
+    return sorted(hits, key=lambda h: (h.name not in changed, h.status != "approaching", h.name != "Chennai",
                                        -h.max_dbz, -h.nodes))
 
 
@@ -626,11 +636,14 @@ DISCLAIMER = ("Disclaimer: Experimental, automated nowcast based on IMD radar. T
               "retaining their intensity and movement. Storms may intensify / weaken in real time. Not an official forecast.")
 
 
-def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automated Rainfall Nowcast") -> tuple[str, list[Hit]]:
-    """Rain-spell wording (Moderate/Heavy/Very heavy): where it is intense now, which way
-    it is moving and where it may go next, then any isolated storms elsewhere. Returns the
-    text and the hits it names; the others become "+N more districts"."""
+def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automated Rainfall Nowcast",
+               continuing: set | None = None) -> tuple[str, list[Hit]]:
+    """Warning-first wording (21 Oct 2026): districts the rain is APPROACHING (with the arrival window), then where it is
+    likely to begin shortly, then where it has newly started, then where it is continuing (already announced), the way
+    the bands move, and any isolated storms elsewhere. `continuing` = districts announced earlier in this episode.
+    Returns the text and the hits it names; the others become "+N more districts"."""
     asof = fmt_time(exp.generated_utc)
+    continuing = continuing or set()
     over_all = sorted((h for h in hits_ordered if h.status == "over"), key=lambda h: -h.nodes)
     appr_all = sorted((h for h in hits_ordered if h.status == "approaching"), key=lambda h: h.lead_min)
     main, iso = [], []
@@ -643,20 +656,30 @@ def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automat
     def compose(n_main: int, n_appr: int, n_iso: int) -> tuple[str, list[Hit]]:
         m, a, i = main[:n_main], appr_all[:n_appr], iso[:n_iso]
         sents = []
+        soon = [h for h in a if h.lead_min < IMMINENT_MIN]
+        later = [h for h in a if h.lead_min >= IMMINENT_MIN]
+        if later:
+            parts = [f"{h.name} ({window_text(h, exp.generated_utc)})" for h in later]
+            sents.append(f"Rainbands approaching {_join(parts)} district{'s' if len(later) > 1 else ''}.")
+        if soon:
+            sents.append(f"Rains likely to begin shortly over parts of {_districts([h.name for h in soon])}.")
+        fresh = [h for h in m if h.name not in continuing]
+        cont = [h for h in m if h.name in continuing]
         for cat in (3, 2, 1):
-            hs = [h for h in m if category(h) == cat]
+            hs = [h for h in fresh if category(h) == cat]
             if hs:
                 sents.append(f"{CATEGORY_NAME[cat]} spell of rains over parts of {_districts([h.name for h in hs])}.")
-        if a:
-            # header names the districts only; the category and the timeline are in the per-district lines
-            sents.append(f"Rainbands approaching {_districts([h.name for h in a])}.")
+        for cat in (3, 2, 1):
+            hs = [h for h in cont if category(h) == cat]
+            if hs:
+                sents.append(f"{CATEGORY_NAME[cat]} rains continuing over parts of {_districts([h.name for h in hs])}.")
         b = motion_bearing(exp, m + a) if (m or a) else None
         if b is not None:
             sents.append(f"Rainbands roughly moving {compass((b + 180) % 360)} to {compass(b)}.")
         if i:
             where = region_of_tn(i[0].lat, i[0].lon)
             sents.append(f"{'Meanwhile isolated' if sents else 'Isolated'} rains around {_districts([h.name for h in i])} in {where}.")
-        listed = m + a + i
+        listed = a + m + i
         dropped = len(hits_ordered) - len(listed)
         body = " ".join(sents)
         if dropped:
@@ -668,20 +691,20 @@ def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automat
         text, listed = compose(n_m, n_a, n_i)
         if len(text) <= 400 or (n_m + n_a + n_i) <= 1:
             return text, listed
-        if n_a > 2:
-            n_a -= 1
-        elif n_m > 3:
+        if n_m > 3:
             n_m -= 1
-        elif n_a > 1:
+        elif n_a > 2:
             n_a -= 1
         elif n_i > 1:
             n_i -= 1
         elif n_m > 1:
             n_m -= 1
+        elif n_a > 1:
+            n_a -= 1
         elif n_i:
             n_i -= 1
         else:
-            n_a -= 1
+            n_m -= 1
 
 
 def _duration_note(h: Hit) -> str:
@@ -1238,48 +1261,32 @@ def _prune_drafts(folder: Path) -> None:
 # --- public platforms --------------------------------------------------------------------
 PUBLIC_POSTING = True                       # set False to switch the whole public-posting step off
 PUBLIC_REGIONS = ("Chennai", "Tiruvallur", "Chengalpattu", "Kancheepuram")
-PUBLIC_REFRESH_MIN = 60                     # a region still active this long after its last post is posted again (rain continuing)
-PUBLIC_MIN_GAP_MIN = 60                     # at most one public post in any 60 minutes
 # The handle also carries the owner's own posts, so the public wording does not say "automated" (Telegram keeps it).
 PUBLIC_HEADER = "COMK Rainfall Nowcast"
-PUBLIC_DISCLAIMER = DISCLAIMER.replace("Experimental, automated nowcast", "Experimental Nowcast").replace("IMD radar.", "IMD Radar. Updates at most once an hour.", 1)
-X_DISCLAIMER = "Experimental Nowcast based on IMD Radar. Updates at most once an hour."
+PUBLIC_DISCLAIMER = DISCLAIMER.replace("Experimental, automated nowcast", "Experimental Nowcast").replace("IMD radar.", "IMD Radar.", 1)
+X_DISCLAIMER = "Experimental Nowcast based on IMD Radar."   # "Updates at most once an hour" dropped 21 Oct: X follows the alerts now
 # Facebook (19 Oct 2026): posts go to the main Chennai Rains Page, which has no automated-account label (X does), so the
 # Facebook text says so itself, in the header and the disclaimer.
 FB_HEADER = "COMK Experimental Automated Rainfall Nowcast"
 FB_DISCLAIMER = PUBLIC_DISCLAIMER.replace("Experimental Nowcast", "Experimental Automated Nowcast", 1)
 
 
-def _public_cycle(a: "Assessment", exp: Export, state: dict, entry: dict, now_utc: datetime, tile_url) -> None:
+def _public_post(tg_text: str, png, changed: set, a: "Assessment", state: dict, entry: dict, now_utc: datetime) -> None:
     import social_publish
     pub = state.setdefault("public", {})
-    ph = [h for h in a.hits if h.name in PUBLIC_REGIONS]
-    action, reason, changed = decide(ph, pub, now_utc, global_gap=PUBLIC_MIN_GAP_MIN, max_per_hour=1,
-                                     vh_exception=False, district_gap=PUBLIC_MIN_GAP_MIN, refresh_gap=PUBLIC_REFRESH_MIN)
-    info = {"action": action, "reason": reason}
-    if action == "send":
-        ordered = order_hits(ph, changed)
-        text, listed = build_text(ordered, exp, header=PUBLIC_HEADER)
-        stamp = now_utc.astimezone(IST).strftime("%Y%m%d_%H%M%S")
-        drafts = Path("state_social_test/drafts")
-        drafts.mkdir(parents=True, exist_ok=True)
-        image = None
-        try:
-            png = render_images(exp, ordered, drafts / f"{stamp}_public.png", tile_url)
-            image = png[0] if isinstance(png, (list, tuple)) and png else png
-        except Exception as e:
-            print(f"[social] public image failed, posting text only: {e!r}")
-        x_text = social_publish.fit_x_text(text, X_DISCLAIMER, HASHTAGS)
-        fb_text = f"{text.replace(PUBLIC_HEADER, FB_HEADER, 1)}\n\n{FB_DISCLAIMER}"
-        res = social_publish.publish(x_text, fb_text, image, stamp)
-        info.update(mode=res["mode"], x=res["x"], facebook=res["facebook"], listed=[h.name for h in listed], text=text)
-        if res["any_ok"]:
-            regs = pub.setdefault("regions", {})
-            for h in ph:
-                regs[h.name].update(active=True, last_post=now_utc.isoformat(), last_status=h.status, last_rank=category(h))
-            pub["last_post_utc"] = now_utc.isoformat()
-            pub["post_times"] = [t for t in pub.get("post_times", []) if _mins(now_utc, _dt(t)) < 120] + [now_utc.isoformat()]
-    entry["public"] = info
+    involved = sorted(n for n in changed if n in PUBLIC_REGIONS)
+    if not involved:
+        entry["public"] = {"action": "skip", "reason": "no Chennai-area district among the changes"}
+        return
+    text = tg_text.replace("COMK Automated Rainfall Nowcast", PUBLIC_HEADER, 1)
+    image = png[0] if isinstance(png, (list, tuple)) and png else png
+    x_text = social_publish.fit_x_text(text, X_DISCLAIMER, HASHTAGS)
+    fb_text = f"{text.replace(PUBLIC_HEADER, FB_HEADER, 1)}\n\n{FB_DISCLAIMER}"
+    stamp = now_utc.astimezone(IST).strftime("%Y%m%d_%H%M%S")
+    res = social_publish.publish(x_text, fb_text, image, stamp)
+    entry["public"] = {"action": "send", "involved": involved, "mode": res["mode"], "x": res["x"], "facebook": res["facebook"]}
+    if res["any_ok"]:
+        pub["last_post_utc"] = now_utc.isoformat()
 
 
 def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
@@ -1349,12 +1356,15 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
     if a.offshore:
         entry["offshore_held"] = a.offshore   # approaching, but the band is still over the sea and beyond OFFSHORE_MAX_KM
 
+    regs_now = state.get("regions", {})
+    continuing = {h.name for h in a.hits if h.name not in changed and regs_now.get(h.name, {}).get("active")
+                  and regs_now.get(h.name, {}).get("last_post")}
+    png = None
     if action == "send":
-        text, listed = build_text(order_hits(a.hits, changed), exp)
+        text, listed = build_text(order_hits(a.hits, changed), exp, continuing=continuing)
         stamp = now_utc.astimezone(IST).strftime("%Y%m%d_%H%M%S")
         drafts = state_dir / "drafts"
         drafts.mkdir(exist_ok=True)
-        png = None
         try:
             png = render_images(exp, order_hits(a.hits, changed), drafts / f"{stamp}.png", tile_url)
         except Exception as e:
@@ -1384,11 +1394,12 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
     else:
         print(f"[social] no post: {reason}")
 
-    # ---- X (Twitter) and the Facebook Page (18 Oct 2026): only Chennai / Tiruvallur / Chengalpattu / Kancheepuram, at most one post
-    # an hour, no Very heavy exception, own state; independent of Telegram. Dry run until PUBLIC_POST_ENABLED=true (social_publish.py).
-    if a.ok and not force and PUBLIC_POSTING:
+    # ---- X (Twitter) / Facebook (21 Oct 2026): the SAME decision and the SAME text as Telegram, posted in the same cycle
+    # whenever the post involves Chennai / Tiruvallur / Chengalpattu / Kancheepuram (so a Telegram post copied to social
+    # media matches what X shows). Manual triggers stay Telegram-only. Dry run until PUBLIC_POST_ENABLED=true.
+    if a.ok and not force and PUBLIC_POSTING and action == "send":
         try:
-            _public_cycle(a, exp, state, entry, now_utc, tile_url)
+            _public_post(text, png, changed, a, state, entry, now_utc)
         except Exception as e:
             entry["public"] = {"action": "error", "reason": f"{type(e).__name__}: {e}"[:200]}
             print(f"[social] public posting failed (Telegram and the map are unaffected): {e!r}")
