@@ -740,24 +740,26 @@ def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automat
 
     def compose(n_main: int, n_appr: int, n_iso: int) -> tuple[str, list[Hit]]:
         m, a, i = main[:n_main], appr_all[:n_appr], iso[:n_iso]
-        sents = []
+        # 22 Oct 2026 (user): heaviest impact first -- each sentence is ranked by its most impactful district
+        units = []
         soon = [h for h in a if h.lead_min < IMMINENT_MIN]
         later = [h for h in a if h.lead_min >= IMMINENT_MIN]
         if later:
             parts = [f"{h.name} ({window_text(h, exp.generated_utc)})" for h in later]
-            sents.append(f"Rainbands approaching {_join(parts)} district{'s' if len(later) > 1 else ''}.")
+            units.append((min(map(impact_key, later)), f"Rainbands approaching {_join(parts)} district{'s' if len(later) > 1 else ''}."))
         if soon:
-            sents.append(f"Rains likely to begin shortly over parts of {_districts([h.name for h in soon])}.")
+            units.append((min(map(impact_key, soon)), f"Rains likely to begin shortly over parts of {_districts([h.name for h in soon])}."))
         fresh = [h for h in m if h.name not in continuing]
         cont = [h for h in m if h.name in continuing]
         for cat in (3, 2, 1):
             hs = [h for h in fresh if category(h) == cat]
             if hs:
-                sents.append(f"{CATEGORY_NAME[cat]} spell of rains over parts of {_districts([h.name for h in hs])}.")
-        for cat in (3, 2, 1):
+                units.append((min(map(impact_key, hs)), f"{CATEGORY_NAME[cat]} spell of rains over parts of {_districts([h.name for h in hs])}."))
             hs = [h for h in cont if category(h) == cat]
             if hs:
-                sents.append(f"{CATEGORY_NAME[cat]} rains continuing over parts of {_districts([h.name for h in hs])}.")
+                units.append((min(map(impact_key, hs)), f"{CATEGORY_NAME[cat]} rains continuing over parts of {_districts([h.name for h in hs])}."))
+        units.sort(key=lambda u: u[0])
+        sents = [u[1] for u in units]
         lasting = [h.name for h in m if persistence(h) == "lasting"]
         brief = [h.name for h in m if persistence(h) == "brief"]
         if lasting:
@@ -1364,6 +1366,18 @@ FB_HEADER = "COMK Experimental Automated Rainfall Nowcast"
 FB_DISCLAIMER = PUBLIC_DISCLAIMER.replace("Experimental Nowcast", "Experimental Automated Nowcast", 1)
 
 
+def _lead_with(text: str, names: list) -> str:
+    """X only has room for 2-3 sentences: the sentences naming the Chennai-area districts that caused this post go first,
+    the rest keep their (impact) order; Telegram keeps the pure impact order."""
+    head, _, rest = text.partition("): ")
+    body = rest.replace(HASHTAGS, "").strip()
+    sents = [x.strip() for x in body.split(". ") if x.strip()]
+    sents = [x if x.endswith(".") or x.endswith(")") else x + "." for x in sents]
+    first = [x for x in sents if any(n in x for n in names) and not x.startswith("Rains over")]
+    out = first + [x for x in sents if x not in first]
+    return f"{head}): {' '.join(out)} {HASHTAGS}"
+
+
 def _public_post(tg_text: str, png, changed: set, a: "Assessment", state: dict, entry: dict, now_utc: datetime) -> None:
     import social_publish
     pub = state.setdefault("public", {})
@@ -1373,7 +1387,7 @@ def _public_post(tg_text: str, png, changed: set, a: "Assessment", state: dict, 
         return
     text = tg_text.replace("COMK Automated Rainfall Nowcast", PUBLIC_HEADER, 1)
     image = list(png) if isinstance(png, (list, tuple)) else png    # all the Telegram images (21 Oct 2026), not just the first
-    x_text = social_publish.fit_x_text(text, X_DISCLAIMER, HASHTAGS)
+    x_text = social_publish.fit_x_text(_lead_with(text, involved), X_DISCLAIMER, HASHTAGS)
     fb_text = f"{text.replace(PUBLIC_HEADER, FB_HEADER, 1)}\n\n{FB_DISCLAIMER}"
     stamp = now_utc.astimezone(IST).strftime("%Y%m%d_%H%M%S")
     res = social_publish.publish(x_text, fb_text, image, stamp)
