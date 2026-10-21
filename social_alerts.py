@@ -91,6 +91,8 @@ GLOBAL_MIN_GAP_MIN = 20    # minimum time between any two posts (was 30) ...
 PRIORITY_GAP_MIN = 10      # ... but a NEWLY APPROACHING district (arrival >= IMMINENT_MIN away) may post 10 min after the last post
 MAX_POSTS_PER_HOUR = 2     # at most this many posts in any rolling 60 minutes ...
 PRIORITY_MAX_PER_HOUR = 3  # ... a newly approaching district may use a third
+GROUP_RADIUS_KM = 40.0     # a newly approaching district whose rain is within this distance of rain in a district announced
+GROUP_HOLD_MIN = 30        # in the last hour is the same band: it waits until this long after the last post (rides along meanwhile)
 IMMINENT_MIN = 15          # arrival this soon: "likely to begin shortly" (the radar picture is ~30 min old; no window that fine)
 # ... EXCEPT a Very heavy spell (a district newly Very heavy, or upgraded to it), which is always announced at once
 MAX_POSTS_PER_DAY = None   # no daily cap (removed 7 Oct: it blocked the afternoon storms); set a number to re-enable
@@ -319,6 +321,10 @@ class Assessment:
 
 
 OFFSHORE_MAX_KM = 25.0     # a band that is still over the sea is only announced once it is this close to the district
+# 21 Oct 2026 (user): Chennai may be warned about a sea band from 50 km -- but only when the band is coming in at
+# >= 20 km/h (distance / forecast arrival time), so a slow band drifting offshore is not announced hours early.
+OFFSHORE_MAX_KM_REGION = {"Chennai": 50.0}
+OFFSHORE_EXT_MIN_SPEED_KMH = 20.0
 LAND_NEAR_KM = 150.0       # ...while echo already over land is announced from further away
 _LAND_CACHE: dict = {}
 
@@ -346,9 +352,10 @@ def land_mask(exp: Export) -> np.ndarray:
     return land_mask_grid(exp.lats, exp.lons)
 
 
-def _offshore_only(exp: Export, reg: Region, idx0: int) -> bool:
+def _offshore_only(exp: Export, reg: Region, idx0: int, lead_min: int | None = None) -> bool:
     """True when the echo about to reach this region is only a band over the sea that is still
-    farther than OFFSHORE_MAX_KM away (and no echo over land is within LAND_NEAR_KM)."""
+    farther than OFFSHORE_MAX_KM away (and no echo over land is within LAND_NEAR_KM). For the regions in
+    OFFSHORE_MAX_KM_REGION the limit is wider when the band approaches at >= OFFSHORE_EXT_MIN_SPEED_KMH."""
     layer = exp.grid[idx0]
     pad = 2.0
     rs, cs = _box(exp.lats, exp.lons, exp.lats[reg.rs].min() - pad, exp.lats[reg.rs].max() + pad,
@@ -373,7 +380,11 @@ def _offshore_only(exp: Export, reg: Region, idx0: int) -> bool:
             la, lo = la[k], lo[k]
         return float(haversine_km_arr(la[:, None], lo[:, None], rlat[None, :], rlon[None, :]).min())
     d_land, d_sea = nearest(on_land), nearest(~on_land)
-    return not (d_land <= LAND_NEAR_KM or d_sea <= OFFSHORE_MAX_KM)
+    limit = OFFSHORE_MAX_KM
+    ext = OFFSHORE_MAX_KM_REGION.get(reg.name)
+    if ext and lead_min and d_sea < float("inf") and d_sea / (lead_min / 60.0) >= OFFSHORE_EXT_MIN_SPEED_KMH:
+        limit = max(limit, ext)
+    return not (d_land <= LAND_NEAR_KM or d_sea <= limit)
 
 
 def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, prev_weak: set | None = None, prev_vh: set | None = None,
@@ -427,7 +438,7 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, 
                 core = max(core, int(((v >= CORE_DBZ) & (v < 255) & reg.sub).sum()))
         if seen_weak:
             weak.append(reg.name)
-        if first is not None and first > 0 and _offshore_only(exp, reg, idx[0][1]):
+        if first is not None and first > 0 and _offshore_only(exp, reg, idx[0][1], first):
             offshore.append(reg.name)
             continue
         if first is not None:
@@ -474,6 +485,15 @@ def _mins(now, then):
     return (now - then).total_seconds() / 60.0 if then else 1e9
 
 
+def _same_band_as_announced(h: Hit, regs: dict, now_utc: datetime) -> bool:
+    """The district's approaching rain lies within GROUP_RADIUS_KM of the rain in a district announced in the last hour."""
+    for st in regs.values():
+        if st.get("active") and st.get("last_lat") is not None and _mins(now_utc, _dt(st.get("last_post"))) < 60:
+            if haversine_km(h.lat, h.lon, st["last_lat"], st["last_lon"]) <= GROUP_RADIUS_KM:
+                return True
+    return False
+
+
 def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = None, max_per_hour: int = None,
            vh_exception: bool = True, district_gap: float = None, refresh_gap: float = None) -> tuple[str, str, set]:
     """("send"|"skip", reason, names of regions that are new or upgraded).
@@ -497,11 +517,15 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
         return "skip", "no strong echo over or heading for any region", set()
 
     changed = set()
-    warn, new, upgraded, vh = [], [], [], []
+    warn, new, upgraded, vh, grouped = [], [], [], [], []
     for h in hits:
         st = regs[h.name]
         rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
         if not st.get("active"):
+            if h.status == "approaching" and _same_band_as_announced(h, regs, now_utc) \
+                    and _mins(now_utc, _dt(state.get("last_post_utc"))) < GROUP_HOLD_MIN:
+                grouped.append(h.name)      # same rainband as a district just announced: no post of its own yet
+                continue
             changed.add(h.name)
             if h.status == "approaching" and h.lead_min >= IMMINENT_MIN:
                 warn.append(h.name)
@@ -515,7 +539,10 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
         elif rank > st.get("last_rank", 0) and _mins(now_utc, _dt(st.get("last_post"))) >= district_gap:
             upgraded.append(h.name); changed.add(h.name)
     if not changed:
-        return "skip", f"nothing new: {len(hits)} active region(s) already announced (rain continuing)", set()
+        why = f"nothing new: {len(hits)} active region(s) already announced (rain continuing)"
+        if grouped:
+            why += f"; held as the same band: {', '.join(grouped)}"
+        return "skip", why, set()
     summary = f"{len(warn)} newly approaching, {len(new)} new rain, {len(upgraded)} upgraded"
     if vh:
         return "send", f"VERY HEAVY: {', '.join(vh)} ({summary})", changed
@@ -1383,7 +1410,8 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
             regs = state.setdefault("regions", {})
             for h in a.hits:       # everything summarised in this post (named or "+N more") counts as announced
                 rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
-                regs[h.name].update(active=True, last_post=now_utc.isoformat(), last_status=h.status, last_rank=rank)
+                regs[h.name].update(active=True, last_post=now_utc.isoformat(), last_status=h.status, last_rank=rank,
+                                    last_lat=round(h.lat, 3), last_lon=round(h.lon, 3))
             state["last_post_utc"] = now_utc.isoformat()
             state["post_times"] = [t for t in state.get("post_times", []) if _mins(now_utc, _dt(t)) < 120] + [now_utc.isoformat()]
             today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
