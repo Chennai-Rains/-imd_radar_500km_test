@@ -705,6 +705,12 @@ def weak_far(h: Hit) -> bool:
             and h.storm_nodes < BRIEF_MAX_NODES and h.storm_peak < BRIEF_MAX_PEAK)
 
 
+def impact_key(h: Hit) -> tuple:
+    """22 Oct 2026 (user): larger clusters and more intense storms take precedence -- category, then the size of the storm
+    bringing the rain, then its peak, then how much of it is in the district."""
+    return (-category(h), -h.storm_nodes, -h.storm_peak, -h.max_dbz, -h.nodes)
+
+
 def is_heavy_raw(h: Hit) -> bool:
     """Heavy-looking this cycle, before the two-cycle confirmation."""
     return h.max_dbz >= HEAVY_DBZ and h.core45 >= HEAVY_CORE_NODES
@@ -722,9 +728,9 @@ def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automat
     Returns the text and the hits it names; the others become "+N more districts"."""
     asof = fmt_time(exp.generated_utc)
     continuing = continuing or set()
-    over_all = sorted((h for h in hits_ordered if h.status == "over"), key=lambda h: -h.nodes)
+    over_all = sorted((h for h in hits_ordered if h.status == "over"), key=impact_key)
     changed = changed or set()
-    appr_all = sorted((h for h in hits_ordered if h.status == "approaching"), key=lambda h: (h.name not in changed, h.lead_min))
+    appr_all = sorted((h for h in hits_ordered if h.status == "approaching"), key=impact_key)
     main, iso = [], []
     if over_all:
         top = over_all[0]
@@ -961,12 +967,9 @@ def split_cells(hits: list[Hit], max_views: int = MAX_IMAGES) -> list[tuple[tupl
     groups: dict[tuple[int, int], list[Hit]] = {}
     for h in hits:
         groups.setdefault(grid_cell(h.lat, h.lon), []).append(h)
-    # 22 Oct 2026: cells in the order their districts appear in the text (hits arrive in text order), so every district
-    # the text names gets a map (a 10:21 PM alert on 21 Oct headlined Tiruppur, which was on none of the 4 images)
-    first = {}
-    for k, h in enumerate(hits):
-        first.setdefault(grid_cell(h.lat, h.lon), k)
-    ordered = sorted(groups.items(), key=lambda kv: first[kv[0]])
+    # 22 Oct 2026: only the districts the text names are passed in; the cell holding the most intense / largest storm
+    # comes first (user: larger clusters and more intense storms take precedence)
+    ordered = sorted(groups.items(), key=lambda kv: min(impact_key(h) for h in kv[1]))
     return ordered[:max_views]
 
 
