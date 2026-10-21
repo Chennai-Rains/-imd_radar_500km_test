@@ -78,18 +78,27 @@ def _record(info: dict) -> None:
         pass
 
 
-def post_x(text: str, image: Path | None) -> tuple[bool, str]:
+def _as_list(images) -> list:
+    if not images:
+        return []
+    items = images if isinstance(images, (list, tuple)) else [images]
+    return [Path(i) for i in items if i and Path(i).exists()]
+
+
+def post_x(text: str, image) -> tuple[bool, str]:
+    """`image`: one path or a list (21 Oct 2026: the same map images Telegram gets, up to X's 4 per post)."""
     k = [os.environ.get(n, "").strip() for n in ("X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_SECRET")]
     if not all(k):
         return False, "X credentials not set"
     try:
-        media_ids = []
-        if image and Path(image).exists():
-            with open(image, "rb") as fh:
+        media_ids, failed = [], []
+        for img in _as_list(image)[:4]:
+            with open(img, "rb") as fh:
                 r = requests.post(X_MEDIA_URL, headers={"Authorization": oauth1_header("POST", X_MEDIA_URL, *k)},
                                   data={"media_category": "tweet_image"}, files={"media": fh}, timeout=60)
             if not r.ok:
-                return False, f"X media upload refused: HTTP {r.status_code} {r.text[:200]}"
+                failed.append(f"HTTP {r.status_code}")       # one bad upload does not stop the post
+                continue
             j = r.json()
             mid = (j.get("data") or {}).get("id") or j.get("media_id_string")
             if mid:
@@ -100,7 +109,8 @@ def post_x(text: str, image: Path | None) -> tuple[bool, str]:
         r = requests.post(X_POST_URL, headers={"Authorization": oauth1_header("POST", X_POST_URL, *k)}, json=body, timeout=30)
         if not r.ok:
             return False, f"X refused: HTTP {r.status_code} {r.text[:200]}"
-        return True, "posted" + ("" if media_ids else " (text only: no image)")
+        note = f" with {len(media_ids)} image(s)" if media_ids else " (text only: no image)"
+        return True, "posted" + note + (f"; {len(failed)} image upload(s) refused: {', '.join(failed)}" if failed else "")
     except Exception as e:
         return False, f"X request failed: {type(e).__name__}"
 
@@ -240,7 +250,7 @@ def publish(x_text: str, fb_text: str, image: Path | None, stamp: str) -> dict:
         res["facebook"] = [True, "dry run"]
     else:
         res["x"] = list(post_x(x_text, image))
-        res["facebook"] = list(post_facebook(fb_text, image)) if FACEBOOK_ENABLED else [False, "Facebook paused (app not live)"]
+        res["facebook"] = list(post_facebook(fb_text, (_as_list(image) or [None])[0])) if FACEBOOK_ENABLED else [False, "Facebook paused (app not live)"]
     res["any_ok"] = bool(res["x"][0] or res["facebook"][0])
     _record({k: v for k, v in res.items()})
     return res

@@ -1363,7 +1363,7 @@ def _public_post(tg_text: str, png, changed: set, a: "Assessment", state: dict, 
         entry["public"] = {"action": "skip", "reason": "no Chennai-area district among the changes"}
         return
     text = tg_text.replace("COMK Automated Rainfall Nowcast", PUBLIC_HEADER, 1)
-    image = png[0] if isinstance(png, (list, tuple)) and png else png
+    image = list(png) if isinstance(png, (list, tuple)) else png    # all the Telegram images (21 Oct 2026), not just the first
     x_text = social_publish.fit_x_text(text, X_DISCLAIMER, HASHTAGS)
     fb_text = f"{text.replace(PUBLIC_HEADER, FB_HEADER, 1)}\n\n{FB_DISCLAIMER}"
     stamp = now_utc.astimezone(IST).strftime("%Y%m%d_%H%M%S")
