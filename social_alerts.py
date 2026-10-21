@@ -715,7 +715,7 @@ DISCLAIMER = ("Disclaimer: Experimental, automated nowcast based on IMD radar. T
 
 
 def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automated Rainfall Nowcast",
-               continuing: set | None = None) -> tuple[str, list[Hit]]:
+               continuing: set | None = None, changed: set | None = None) -> tuple[str, list[Hit]]:
     """Warning-first wording (21 Oct 2026): districts the rain is APPROACHING (with the arrival window), then where it is
     likely to begin shortly, then where it has newly started, then where it is continuing (already announced), the way
     the bands move, and any isolated storms elsewhere. `continuing` = districts announced earlier in this episode.
@@ -723,7 +723,8 @@ def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automat
     asof = fmt_time(exp.generated_utc)
     continuing = continuing or set()
     over_all = sorted((h for h in hits_ordered if h.status == "over"), key=lambda h: -h.nodes)
-    appr_all = sorted((h for h in hits_ordered if h.status == "approaching"), key=lambda h: h.lead_min)
+    changed = changed or set()
+    appr_all = sorted((h for h in hits_ordered if h.status == "approaching"), key=lambda h: (h.name not in changed, h.lead_min))
     main, iso = [], []
     if over_all:
         top = over_all[0]
@@ -773,7 +774,7 @@ def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automat
     n_m, n_a, n_i = min(len(main), MAX_NAMED_REGIONS), min(len(appr_all), 4), min(len(iso), 2)
     while True:
         text, listed = compose(n_m, n_a, n_i)
-        if len(text) <= 400 or (n_m + n_a + n_i) <= 1:
+        if len(text) <= 600 or (n_m + n_a + n_i) <= 1:   # 600 (was 400, 22 Oct): the persistence sentence repeats names; Telegram takes 1024, X is fitted separately
             return text, listed
         if n_m > 3:
             n_m -= 1
@@ -960,7 +961,12 @@ def split_cells(hits: list[Hit], max_views: int = MAX_IMAGES) -> list[tuple[tupl
     groups: dict[tuple[int, int], list[Hit]] = {}
     for h in hits:
         groups.setdefault(grid_cell(h.lat, h.lon), []).append(h)
-    ordered = sorted(groups.items(), key=lambda kv: (-max(category(h) for h in kv[1]), -max(h.max_dbz for h in kv[1])))
+    # 22 Oct 2026: cells in the order their districts appear in the text (hits arrive in text order), so every district
+    # the text names gets a map (a 10:21 PM alert on 21 Oct headlined Tiruppur, which was on none of the 4 images)
+    first = {}
+    for k, h in enumerate(hits):
+        first.setdefault(grid_cell(h.lat, h.lon), k)
+    ordered = sorted(groups.items(), key=lambda kv: first[kv[0]])
     return ordered[:max_views]
 
 
@@ -1445,16 +1451,21 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
     continuing = {h.name for h in a.hits if h.name not in changed and regs_now.get(h.name, {}).get("active")
                   and regs_now.get(h.name, {}).get("last_post")}
     png = None
+    # 22 Oct 2026: small weak rain still >= 30 min away is not named (it arrived only ~55 % of the time) and is not marked
+    # as announced, so it can still trigger its own post once it is close
+    shown = [h for h in a.hits if not weak_far(h)]
+    if a.hits and not shown:
+        shown = a.hits
     if action == "send":
-        text, listed = build_text(order_hits(a.hits, changed), exp, continuing=continuing)
+        text, listed = build_text(order_hits(shown, changed), exp, continuing=continuing, changed=changed)
         stamp = now_utc.astimezone(IST).strftime("%Y%m%d_%H%M%S")
         drafts = state_dir / "drafts"
         drafts.mkdir(exist_ok=True)
         try:
-            png = render_images(exp, order_hits(a.hits, changed), drafts / f"{stamp}.png", tile_url)
+            png = render_images(exp, listed, drafts / f"{stamp}.png", tile_url)
         except Exception as e:
             print(f"[social] image failed, sending text only: {e!r}")
-        ordered = order_hits(a.hits, changed)
+        ordered = order_hits(shown, changed)
         details = build_details(listed, ordered, exp.generated_utc)
         caption = fit_caption(text, details if SHOW_DISTRICT_LINES else "")
         (drafts / f"{stamp}.txt").write_text(text + "\n")
@@ -1466,7 +1477,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         entry["listed"] = [h.name for h in listed]
         if sent:
             regs = state.setdefault("regions", {})
-            for h in a.hits:       # everything summarised in this post (named or "+N more") counts as announced
+            for h in shown:        # everything summarised in this post (named or "+N more") counts as announced
                 rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
                 regs[h.name].update(active=True, last_post=now_utc.isoformat(), last_status=h.status, last_rank=rank,
                                     last_lat=round(h.lat, 3), last_lon=round(h.lon, 3))
