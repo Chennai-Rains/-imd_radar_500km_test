@@ -93,6 +93,12 @@ MAX_POSTS_PER_HOUR = 2     # at most this many posts in any rolling 60 minutes .
 PRIORITY_MAX_PER_HOUR = 3  # ... a newly approaching district may use a third
 GROUP_RADIUS_KM = 40.0     # a newly approaching district whose rain is within this distance of rain in a district announced
 GROUP_HOLD_MIN = 30        # in the last hour is the same band: it waits until this long after the last post (rides along meanwhile)
+# 21 Oct 2026, from 14-21 Oct data (storm-trend notes): rain from a medium/large storm peaking >= 50 dBZ was still there an hour
+# later 71-76 % of the time, from a small cell below 45 dBZ only 45 % -- so the text says how long it is likely to last.
+# Far approaching calls from small weak rain arrived only 52-57 % of the time (others 71-76 %), so they wait until < 30 min.
+LASTING_MEDIUM_NODES, LASTING_LARGE_NODES = 15, 50
+BRIEF_MAX_NODES, BRIEF_MAX_PEAK = 15, 45.0
+WEAK_FAR_LEAD_MIN = 30
 IMMINENT_MIN = 15          # arrival this soon: "likely to begin shortly" (the radar picture is ~30 min old; no window that fine)
 # ... EXCEPT a Very heavy spell (a district newly Very heavy, or upgraded to it), which is always announced at once
 MAX_POSTS_PER_DAY = None   # no daily cap (removed 7 Oct: it blocked the afternoon storms); set a number to re-enable
@@ -304,6 +310,8 @@ class Hit:
     end_lead: int = 0          # last lead (min) at which the region still holds strong echo
     vh_ok: bool = True         # Very heavy allowed: seen as intense in the previous cycle too, and not a small (< min_nodes) cell
     heavy_ok: bool = True      # Heavy allowed: the district looked Heavy in the previous cycle too (20 Oct 2026)
+    storm_nodes: int = 0       # size of the whole storm (connected >= ALERT_DBZ nodes) that brings the rain, at the first lead
+    storm_peak: float = 0.0    # its peak dBZ
 
 
 @dataclass
@@ -413,6 +421,25 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, 
     idx.sort()
 
     hits, uncovered, offshore, weak, persisted, intense, heavy = [], [], [], [], [], [], []
+    from scipy import ndimage as _ndi
+    _labels = {}
+
+    def storm_at(i_layer, reg, strong_mask):
+        """(size, peak) of the largest connected >= ALERT_DBZ storm that has nodes in this region's strong mask."""
+        if i_layer not in _labels:
+            v = exp.grid[i_layer]
+            m = (v >= ALERT_DBZ) & (v < 255)
+            _labels[i_layer] = (_ndi.label(m, structure=np.ones((3, 3)))[0], v)
+        lab, v = _labels[i_layer]
+        ids = np.unique(lab[reg.rs, reg.cs][strong_mask])
+        ids = ids[ids > 0]
+        best = (0, 0.0)
+        for k in ids:
+            mk = lab == k
+            n = int(mk.sum())
+            if n > best[0]:
+                best = (n, float(v[mk].max()))
+        return best
     prev_weak = prev_weak or set()
     for reg in regions:
         first_layer = exp.grid[idx[0][1]][reg.rs, reg.cs][reg.sub]
@@ -420,6 +447,7 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, 
             uncovered.append(reg.name)
             continue
         first, nodes_first, max_dbz, cen, core, last = None, 0, 0.0, None, 0, 0
+        storm = (0, 0.0)
         thr = reg.min_nodes_persist if reg.name in prev_weak else reg.min_nodes   # small cells need to have been seen last cycle too
         seen_weak = False
         for lead, i in idx:
@@ -432,6 +460,7 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, 
                 last = lead
                 if first is None:
                     first, nodes_first = lead, n
+                    storm = storm_at(i, reg, strong)
                     ys, xs = np.where(strong)
                     cen = (float(exp.lats[reg.rs][ys].mean()), float(exp.lons[reg.cs][xs].mean()))
                 max_dbz = max(max_dbz, float(v[strong].max()))
@@ -445,7 +474,8 @@ def assess(exp: Export, now_utc: datetime, regions: list[Region] | None = None, 
             if nodes_first < reg.min_nodes:
                 persisted.append(reg.name)
             h = Hit(reg.name, "over" if first == 0 else "approaching", first, max_dbz, nodes_first,
-                    exp.generated_utc + timedelta(minutes=first), cen[0], cen[1], core, last)
+                    exp.generated_utc + timedelta(minutes=first), cen[0], cen[1], core, last,
+                    storm_nodes=storm[0], storm_peak=storm[1])
             if is_heavy_raw(h):
                 heavy.append(reg.name)
                 # Heavy must show in two cycles running (20 Oct 2026, user's choice): cores pulsing around 45 dBZ made
@@ -517,11 +547,14 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
         return "skip", "no strong echo over or heading for any region", set()
 
     changed = set()
-    warn, new, upgraded, vh, grouped = [], [], [], [], []
+    warn, new, upgraded, vh, grouped, held_weak = [], [], [], [], [], []
     for h in hits:
         st = regs[h.name]
         rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
         if not st.get("active"):
+            if weak_far(h):
+                held_weak.append(h.name)    # small weak rain still >= 30 min away: no post of its own yet
+                continue
             if h.status == "approaching" and _same_band_as_announced(h, regs, now_utc) \
                     and _mins(now_utc, _dt(state.get("last_post_utc"))) < GROUP_HOLD_MIN:
                 grouped.append(h.name)      # same rainband as a district just announced: no post of its own yet
@@ -542,6 +575,8 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
         why = f"nothing new: {len(hits)} active region(s) already announced (rain continuing)"
         if grouped:
             why += f"; held as the same band: {', '.join(grouped)}"
+        if held_weak:
+            why += f"; small weak rain still far: {', '.join(held_weak)}"
         return "skip", why, set()
     summary = f"{len(warn)} newly approaching, {len(new)} new rain, {len(upgraded)} upgraded"
     if vh:
@@ -654,6 +689,22 @@ def category(h: Hit) -> int:
     return 1
 
 
+def persistence(h: Hit) -> str | None:
+    """'lasting' / 'brief' / None from the size and peak of the storm bringing the rain."""
+    if (h.storm_nodes >= LASTING_MEDIUM_NODES and h.storm_peak >= 50) or (h.storm_nodes >= LASTING_LARGE_NODES and h.storm_peak >= 45):
+        return "lasting"
+    if h.storm_nodes < BRIEF_MAX_NODES and h.storm_peak < BRIEF_MAX_PEAK:
+        return "brief"
+    return None
+
+
+def weak_far(h: Hit) -> bool:
+    """Approaching rain that is small and weak in the district and still far off: arrived only ~55 % of the time."""
+    # judged on the WHOLE storm (a big storm's leading edge touching the district is not "small weak rain")
+    return (h.status == "approaching" and h.lead_min >= WEAK_FAR_LEAD_MIN
+            and h.storm_nodes < BRIEF_MAX_NODES and h.storm_peak < BRIEF_MAX_PEAK)
+
+
 def is_heavy_raw(h: Hit) -> bool:
     """Heavy-looking this cycle, before the two-cycle confirmation."""
     return h.max_dbz >= HEAVY_DBZ and h.core45 >= HEAVY_CORE_NODES
@@ -700,6 +751,12 @@ def build_text(hits_ordered: list[Hit], exp: Export, header: str = "COMK Automat
             hs = [h for h in cont if category(h) == cat]
             if hs:
                 sents.append(f"{CATEGORY_NAME[cat]} rains continuing over parts of {_districts([h.name for h in hs])}.")
+        lasting = [h.name for h in m if persistence(h) == "lasting"]
+        brief = [h.name for h in m if persistence(h) == "brief"]
+        if lasting:
+            sents.append(f"Rains over {_join(lasting)} likely to continue for the next hour.")
+        if brief:
+            sents.append(f"Rains over {_join(brief)} may be brief.")
         b = motion_bearing(exp, m + a) if (m or a) else None
         if b is not None:
             sents.append(f"Rainbands roughly moving {compass((b + 180) % 360)} to {compass(b)}.")
@@ -1365,7 +1422,8 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
              "over": [h.name for h in a.hits if h.status == "over"],
              "heading": {h.name: h.lead_min for h in a.hits if h.status == "approaching"},
              "max_dbz": round(max((h.max_dbz for h in a.hits), default=0.0), 1),
-             "hits": {h.name: [h.status[0], h.max_dbz, h.core45, h.nodes] for h in a.hits}}   # status, peak dBZ, core nodes, strong nodes
+             "hits": {h.name: [h.status[0], h.max_dbz, h.core45, h.nodes, h.storm_nodes, round(h.storm_peak)] for h in a.hits}}
+    # status, peak dBZ in the district, core nodes, strong nodes in the district, whole-storm size, whole-storm peak
     if a.uncovered:
         entry["no_coverage"] = len(a.uncovered)
     if quiet_held:
