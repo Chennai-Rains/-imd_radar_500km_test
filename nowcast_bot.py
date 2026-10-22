@@ -3743,6 +3743,12 @@ BOT_CELL_LEAD_TIMES_MIN = (30, 60, 90)   # projected positions listed per cell; 
 # pixel into a whole 5 sq km node: three specks about 1 km across came out
 # as a 48 sq km "rain area", and NIOT's 95 m pixels made it worse.
 BOT_MIN_ECHO_FRACTION = 0.25
+# Echo weaker than this is not rain for the bots (22 Oct 2026). The MAXZ products start their colour scale at 20 dBZ,
+# but the PPI products (cni_ppi, tvm_ppi) carry IMD's whole scale down to ~2 dBZ: every Chennai PPI frame has
+# thousands of 2-18 dBZ pixels -- ground clutter and clear-air return, ~50 of them within 5 km of Padi, 11 km from
+# the radar. Once cni_ppi replaced cni_maxz within 98 km (BOT_DEFER_TO), Thuni Podalama said "Raining now" for
+# Padi at 9:16 AM on 22 Oct with nothing on the map. The file's own how_to_read already says images start at 20 dBZ.
+BOT_MIN_DBZ = 20.0
 # Optical flow between two frames is only trusted when they are a sensible
 # distance apart in time: too close and a one-pixel wobble reads as a fast
 # storm, too far and the pattern has changed too much to match.
@@ -3839,6 +3845,7 @@ def _bot_regrid_dbz(dbz: np.ndarray, product: str, lat2d: np.ndarray, lon2d: np.
     # rounding the node onto the pixel grid).
     half_cell_px = BOT_GRID_STEP_DEG * 111.0 * PRODUCTS[product]["km_per_px"] / 2.0
     k = 2 * int(np.floor(half_cell_px + 0.5)) + 1
+    dbz = np.where(dbz >= BOT_MIN_DBZ, dbz, np.nan)    # weaker than BOT_MIN_DBZ: seen, but no rain (see BOT_MIN_DBZ)
     echo = ~np.isnan(dbz)
     src = np.where(echo, dbz, -1.0)
     if k > 1:
