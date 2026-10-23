@@ -1,6 +1,6 @@
 {
  "caz_plk.gif": {
-  "t": "2026-10-23 02:11:15",
+  "t": "2026-10-23 02:17:07",
   "result": "ok",
   "http": 200,
   "last_modified": "Fri, 23 Oct 2026 02:05:31 GMT",
@@ -8,15 +8,15 @@
   "error": null
  },
  "caz_kkl.gif": {
-  "t": "2026-10-23 02:11:22",
-  "result": "ok",
-  "http": 200,
-  "last_modified": "Fri, 23 Oct 2026 02:09:06 GMT",
-  "bytes": 102659,
-  "error": null
+  "t": "2026-10-23 02:17:32",
+  "result": "failed",
+  "http": null,
+  "last_modified": null,
+  "bytes": 0,
+  "error": "HTTPSConnectionPool(host='mausam.imd.gov.in', port=443): Max retries exceeded with url: /Radar/caz_kkl.gif?_=1792721832 (Caused by ConnectTimeoutError(<HTTPSCon"
  },
  "ppz_kkl.gif": {
-  "t": "2026-10-23 02:11:25",
+  "t": "2026-10-23 02:17:35",
   "result": "ok",
   "http": 200,
   "last_modified": "Fri, 23 Oct 2026 01:51:22 GMT",
@@ -24,35 +24,35 @@
   "error": null
  },
  "caz_cni.gif": {
-  "t": "2026-10-23 02:11:46",
+  "t": "2026-10-23 02:17:38",
+  "result": "ok",
+  "http": 200,
+  "last_modified": "Fri, 23 Oct 2026 02:16:56 GMT",
+  "bytes": 295630,
+  "error": null
+ },
+ "ppi_cni.gif": {
+  "t": "2026-10-23 02:17:59",
   "result": "failed",
   "http": null,
   "last_modified": null,
   "bytes": 0,
-  "error": "HTTPSConnectionPool(host='mausam.imd.gov.in', port=443): Max retries exceeded with url: /Radar/caz_cni.gif?_=1792721486 (Caused by ConnectTimeoutError(<HTTPSCon"
- },
- "ppi_cni.gif": {
-  "t": "2026-10-23 02:12:12",
-  "result": "ok",
-  "http": 200,
-  "last_modified": "Fri, 23 Oct 2026 01:51:19 GMT",
-  "bytes": 386271,
-  "error": null
+  "error": "HTTPSConnectionPool(host='mausam.imd.gov.in', port=443): Max retries exceeded with url: /Radar/ppi_cni.gif?_=1792721859 (Caused by ConnectTimeoutError(<HTTPSCon"
  },
  "caz_mlr.gif": {
-  "t": "2026-10-23 02:12:21",
+  "t": "2026-10-23 02:18:05",
   "result": "ok",
   "http": 200,
-  "last_modified": "Fri, 23 Oct 2026 02:05:18 GMT",
-  "bytes": 434357,
+  "last_modified": "Fri, 23 Oct 2026 02:16:25 GMT",
+  "bytes": 434896,
   "error": null
  },
  "ppi_tvm.gif": {
-  "t": "2026-10-23 02:12:34",
-  "result": "ok",
-  "http": 200,
-  "last_modified": "Fri, 23 Oct 2026 01:51:19 GMT",
-  "bytes": 46067,
-  "error": null
+  "t": "2026-10-23 02:18:27",
+  "result": "failed",
+  "http": null,
+  "last_modified": null,
+  "bytes": 0,
+  "error": "HTTPSConnectionPool(host='mausam.imd.gov.in', port=443): Max retries exceeded with url: /Radar/ppi_tvm.gif?_=1792721886 (Caused by ConnectTimeoutError(<HTTPSCon"
  }
 }
