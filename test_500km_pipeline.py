@@ -104,7 +104,9 @@ import nowcast_bot as nb
 # maintenance. Its update schedule is erratic compared with the other radars;
 # stale frames are handled by the same age checks as every other product.
 # cni_ppz (Chennai Extended) switched off 12 Oct 2026: ~400 strong echo px inside Karaikal MAXZ range where Karaikal showed none.
-TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "cni_maxz", "cni_ppi", "mlr_maxz", "tvm_ppi")
+# vsk_maxz / vsk_ppi / mpt_maxz (Visakhapatnam, Machilipatnam DWRs) added 27 Oct 2026 for a cyclone off the north Andhra
+# coast: map only (left out of the bot export below -- the alerts cover Tamil Nadu, and they would stretch the grid).
+TEST_PRODUCTS = ("maxz", "kkl_maxz", "kkl_ppz", "cni_maxz", "cni_ppi", "mlr_maxz", "tvm_ppi", "vsk_maxz", "vsk_ppi", "mpt_maxz")
 
 nb.POLLED_PRODUCTS = TEST_PRODUCTS
 nb.ARCHIVE_DIR = Path("archive_500km_test")
@@ -122,7 +124,7 @@ nb.OUTPUT_BOT_GRID = Path("output/nowcast_bot_grid_500km_test.bin.gz")
 # next (a ~20,000 sq km patch over the sea west of the coast on 2 Oct 2026),
 # which reads as ground/sea clutter rather than rain, and the bot would
 # report it as rain there. Put it back once that has been cleaned up.
-nb.BOT_EXCLUDED_PRODUCTS = ("mlr_maxz", "cni_ppz")   # cni_ppz: terrain shading reads as echo at its real position until a static terrain mask is in (12 Oct)
+nb.BOT_EXCLUDED_PRODUCTS = ("mlr_maxz", "cni_ppz", "vsk_maxz", "vsk_ppi", "mpt_maxz")   # cni_ppz: terrain shading reads as echo at its real position until a static terrain mask is in (12 Oct)
 nb.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
 nb.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 nb.OUTPUT_HTML.parent.mkdir(parents=True, exist_ok=True)

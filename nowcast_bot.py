@@ -171,6 +171,12 @@ RADAR_SITES = {
     },
 }
 
+# --- 27 Oct 2026: Visakhapatnam and Machilipatnam DWRs (test repo only; a cyclone off the north Andhra coast). Site
+# positions are measured from each frame's own lat/lon gridlines (fit 126.0 px per deg lon / 133.0 px per deg lat on
+# caz_vsk, 139.0 / 144.5 on caz_mpt -- both matching the printed Hor Res) run through the range-ring centre.
+RADAR_SITES["visakhapatnam"] = {"site_lat": 17.748, "site_lon": 83.353, "site_elev_m": 50.0, "band": "S"}
+RADAR_SITES["machilipatnam"] = {"site_lat": 16.183, "site_lon": 81.147, "site_elev_m": 10.0, "band": "S"}
+
 PRODUCT_RADAR = {
     "ppi": "niot", "maxz": "niot", "ppz": "niot",
     "kkl_ppi": "karaikal", "kkl_ppz": "karaikal", "kkl_maxz": "karaikal",
@@ -178,6 +184,7 @@ PRODUCT_RADAR = {
     "cni_maxz": "chennai", "cni_ppz": "chennai", "cni_ppi": "chennai",
     "mlr_maxz": "mangalore",
     "tvm_maxz": "trivandrum", "tvm_ppi": "trivandrum",
+    "vsk_maxz": "visakhapatnam", "vsk_ppi": "visakhapatnam", "mpt_maxz": "machilipatnam",
 }
 
 EFFECTIVE_EARTH_RADIUS_KM = 8494.0  # standard 4/3-Earth-radius model
@@ -1791,6 +1798,27 @@ def decode_reflectivity(img: Image.Image, product: str, lut: list) -> np.ndarray
         if y1 > y0 and x1 > x0:
             dbz[y0:y1, x0:x1] = np.nan
 
+    # 27 Oct 2026 (Visakhapatnam / Machilipatnam): overlays drawn in legend colours. Lat/lon grid lines are removed by
+    # their known pixel position (+-1 px); thin red boundary lines by shape -- pixels of those colours that do not
+    # survive a 3x3 opening (lines up to ~2 px wide) and are not next to a surviving solid red patch.
+    grid = cfg.get("grid_lines_px")
+    if grid:
+        for gx in grid.get("x", []):
+            c0, c1 = max(gx - l - 1, 0), min(gx - l + 2, w)
+            if c1 > c0:
+                dbz[:, c0:c1] = np.nan
+        for gy in grid.get("y", []):
+            r0, r1 = max(gy - t - 1, 0), min(gy - t + 2, h)
+            if r1 > r0:
+                dbz[r0:r1, :] = np.nan
+    line_cols = cfg.get("thin_line_filter")
+    if line_cols:
+        packed2 = (arr[..., 0].astype(np.int64) * 65536 + arr[..., 1].astype(np.int64) * 256 + arr[..., 2].astype(np.int64))
+        red = np.isin(packed2, [r_ * 65536 + g_ * 256 + b_ for (r_, g_, b_) in line_cols])
+        solid = ndimage.binary_opening(red, structure=np.ones((cfg.get("thin_line_px", 3),) * 2))
+        thin = red & ~ndimage.binary_dilation(solid, iterations=1)
+        dbz[thin] = np.nan
+
     static_mask = get_static_exclude_mask(product)
     if static_mask is not None:
         dbz[static_mask] = np.nan
@@ -2305,10 +2333,58 @@ PRODUCT_STYLE = {
     "mlr_maxz": {"color": "#bcbd22", "label": "Mangaluru DWR MAXZ - aloft / building"},
     "tvm_maxz": {"color": "#9467bd", "label": "Trivandrum DWR MAXZ - aloft / building"},
     "tvm_ppi": {"color": "#9467bd", "label": "Trivandrum DWR PPI (2 deg)"},
+    "vsk_maxz": {"color": "#17becf", "label": "Visakhapatnam DWR MAXZ"},
+    "vsk_ppi": {"color": "#17becf", "label": "Visakhapatnam DWR PPI (0.2 deg)"},
+    "mpt_maxz": {"color": "#8c564b", "label": "Machilipatnam DWR MAXZ"},
+}
+
+
+# Same Selex Rainbow layout as Chennai DWR (caz_cni / ppi_cni): "HH:MM / DD-Mon-YYYY", dithered web palette. Calibrated
+# from one frame each (27 Oct 2026, 12:30-12:40 UTC). White (lat/lon grid) and red (state/district lines, VSK) overlays
+# share colours with the 40 and 52-55 dBZ bands, so they are removed by position (grid_lines_px) and by thinness
+# (thin_line_filter) instead of by colour.
+PRODUCTS["vsk_maxz"] = {
+    "url": "https://mausam.imd.gov.in/Radar/caz_vsk.gif", "role": "aloft_early_warning",
+    "range_km": 250.0, "elevation_deg": None, "image_size": (1006, 800),
+    "site_px": (299.5, 498.5), "km_per_px": 1.2005,        # pixels per km ("Hor Res: 0.833 km/pixel")
+    "colorbar_bbox": (812, 71, 886, 532), "value_at_top": 60.0, "value_at_bottom": 20.0, "min_swatch_rows": 2,
+    "timestamp_bbox": (800, 20, 1006, 48), "elevation_bbox": None, "plot_bbox": (0, 198, 603, 800),
+    "cell_dbz_threshold": 35, "despeckle_min_px": 60,   # map labels / line junctions are small isolated patches
+    "grid_lines_px": {"x": [129, 255, 382, 507], "y": [332, 465, 598, 731]},
+    "thin_line_filter": [(255, 0, 0), (204, 0, 0), (255, 51, 0), (255, 51, 51), (204, 51, 51), (153, 0, 0)], "thin_line_px": 6,
+    "max_range_km": 248.0,
+    "label_exclude_boxes": [(555, 755, 603, 800)],
+    "exclude_colors": [(102, 204, 255), (153, 204, 255), (102, 153, 255), (153, 153, 255),
+                           (102, 153, 204), (102, 204, 204), (153, 153, 204), (153, 204, 204)],
+}
+PRODUCTS["vsk_ppi"] = {
+    "url": "https://mausam.imd.gov.in/Radar/ppi_vsk.gif", "role": "aloft_early_warning",
+    "range_km": 150.0, "elevation_deg": 0.2, "image_size": (807, 601),
+    "site_px": (299.0, 299.5), "km_per_px": 2.004,          # pixels per km ("Resolution: 0.499 km/pixel")
+    "max_range_km": 140.0,
+    "colorbar_bbox": (614, 72, 687, 381), "value_at_top": 60.0, "value_at_bottom": 20.0, "min_swatch_rows": 2,
+    "timestamp_bbox": (600, 20, 807, 52), "elevation_bbox": None, "plot_bbox": (0, 0, 600, 601),
+    "cell_dbz_threshold": 35, "despeckle_min_px": 60,   # map labels / line junctions are small isolated patches
+    "thin_line_filter": [(255, 0, 0), (204, 0, 0), (255, 51, 0), (255, 51, 51), (204, 51, 51), (204, 51, 0)], "thin_line_px": 6,
+    "label_exclude_boxes": [(555, 555, 600, 601)],
+    "exclude_colors": [(102, 204, 255), (153, 204, 255), (102, 153, 255), (153, 153, 255),
+                           (102, 153, 204), (102, 204, 204), (153, 153, 204), (153, 204, 204)],
+}
+PRODUCTS["mpt_maxz"] = {
+    "url": "https://mausam.imd.gov.in/Radar/caz_mpt.gif", "role": "aloft_early_warning",
+    "range_km": 250.0, "elevation_deg": None, "image_size": (1119, 900),
+    "site_px": (323.5, 573.5), "km_per_px": 1.3004,        # pixels per km ("Hor Res: 0.769 km/pixel")
+    "colorbar_bbox": (912, 74, 986, 604), "value_at_top": 62.5, "value_at_bottom": 20.0, "min_swatch_rows": 2,
+    "timestamp_bbox": (895, 20, 1119, 48), "elevation_bbox": None, "plot_bbox": (0, 250, 650, 900),
+    "cell_dbz_threshold": 35, "despeckle_min_px": 60,   # map labels / line junctions are small isolated patches
+    "grid_lines_px": {"x": [26, 165, 303, 442, 582], "y": [311, 456, 600, 744, 889]}, "max_range_km": 248.0,
+    "exclude_colors": [(102, 204, 255), (153, 204, 255), (102, 153, 255), (153, 153, 255),
+                           (102, 153, 204), (102, 204, 204), (153, 153, 204), (153, 204, 204), (255, 0, 102), (204, 51, 102), (255, 51, 102), (204, 0, 102)],
 }
 
 RADAR_MARKER_LABEL = {"niot": "NIOT X-DWR Chennai", "karaikal": "Karaikal DWR",
-                       "kochi": "Kochi DWR", "trivandrum": "Trivandrum DWR"}
+                       "kochi": "Kochi DWR", "trivandrum": "Trivandrum DWR",
+                       "visakhapatnam": "Visakhapatnam DWR", "machilipatnam": "Machilipatnam DWR"}
 
 # CARTO now requires an API key even for the free Voyager basemap tiles.
 # NOTE: this key travels in the tile URL itself, so it's visible to anyone
