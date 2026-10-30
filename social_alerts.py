@@ -701,8 +701,11 @@ def persistence(h: Hit) -> str | None:
 def weak_far(h: Hit) -> bool:
     """Approaching rain that is small and weak in the district and still far off: arrived only ~55 % of the time."""
     # judged on the WHOLE storm (a big storm's leading edge touching the district is not "small weak rain")
+    # 31 Oct 2026: the peak no longer rescues a tiny storm. A 9-node, 47 dBZ cell was called for Pudukkottai 90 min
+    # ahead (10:46 PM, 30 Oct) and was gone 15 min later. Replay 25-31 Oct: storms under 15 nodes called 30+ min ahead
+    # arrived 30-36 % of the time whatever their peak (vs 60-74 % when under 30 min away).
     return (h.status == "approaching" and h.lead_min >= WEAK_FAR_LEAD_MIN
-            and h.storm_nodes < BRIEF_MAX_NODES and h.storm_peak < BRIEF_MAX_PEAK)
+            and h.storm_nodes < BRIEF_MAX_NODES)
 
 
 def impact_key(h: Hit) -> tuple:

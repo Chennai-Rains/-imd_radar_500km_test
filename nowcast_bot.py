@@ -3933,6 +3933,7 @@ BOT_EXCLUDED_PRODUCTS: tuple = ()
 # this cycle the MAXZ simply stays in use.
 BOT_DEFER_TO: dict = {"cni_maxz": "cni_ppi"}
 BOT_LONG_RANGE_PRODUCTS: tuple = ("cni_ppz", "kkl_ppz")   # see the cross-check block in export_bot_data()
+BOT_LONG_RANGE_MIN_CORE_DBZ: float = 45.0   # a far-only patch needs a core this strong to count
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -4184,6 +4185,21 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
         if covered.any():
             regridded[p] = np.where(covered, np.nan, regridded[p])
             print(f"[bot-export] {p}: {int(covered.sum())} nodes left to the short-range radars")
+        # 31 Oct 2026: what the extended products still see on their own is 250-500 km out, where the beam is
+        # 6-10 km up. Weak patches there fed two false Thoothukudi alerts (4:01 / 4:32 AM, Karaikal Extended echo
+        # 265-310 km out, 25-44 dBZ, nothing on Trivandrum or on the ground). Such a patch now counts only if it
+        # holds a convective core (>= BOT_LONG_RANGE_MIN_CORE_DBZ); otherwise the whole patch is dropped.
+        vals = regridded[p]
+        echo = np.isfinite(vals) & (vals > 0)
+        if echo.any():
+            lab, n = ndimage.label(echo, structure=np.ones((3, 3)))
+            peaks = ndimage.maximum(np.where(echo, vals, 0), lab, index=np.arange(1, n + 1))
+            weak_ids = np.flatnonzero(np.asarray(peaks) < BOT_LONG_RANGE_MIN_CORE_DBZ) + 1
+            if weak_ids.size:
+                drop = np.isin(lab, weak_ids)
+                regridded[p] = np.where(drop, np.nan, vals)
+                print(f"[bot-export] {p}: {weak_ids.size}/{n} far patches without a "
+                      f"{BOT_LONG_RANGE_MIN_CORE_DBZ:.0f} dBZ core dropped ({int(drop.sum())} nodes)")
 
     if not regridded:
         print("[bot-export] no usable radar this cycle -- writing an index that says so, no grid")
