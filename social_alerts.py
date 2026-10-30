@@ -99,6 +99,11 @@ GROUP_HOLD_MIN = 30        # in the last hour is the same band: it waits until t
 LASTING_MEDIUM_NODES, LASTING_LARGE_NODES = 15, 50
 BRIEF_MAX_NODES, BRIEF_MAX_PEAK = 15, 45.0
 WEAK_FAR_LEAD_MIN = 30
+# 31 Oct 2026: a district whose rain comes from a tiny storm (< BRIEF_MAX_NODES) is announced only once that storm has
+# been there for TINY_CONFIRM_MIN -- i.e. on a later radar picture, not the same frame moved forward 5 min (Karaikal
+# updates every 10 min). Karur 30 Oct 10:16 PM and 27 Oct 7:26 AM, Nagapattinam 26 Oct 10:11 AM / 10:16 PM: all
+# single-picture blips, gone 10 min later. Tiny storms that last are posted ~5-10 min later instead.
+TINY_CONFIRM_MIN = 8
 IMMINENT_MIN = 15          # arrival this soon: "likely to begin shortly" (the radar picture is ~30 min old; no window that fine)
 # ... EXCEPT a Very heavy spell (a district newly Very heavy, or upgraded to it), which is always announced at once
 MAX_POSTS_PER_DAY = None   # no daily cap (removed 7 Oct: it blocked the afternoon storms); set a number to re-enable
@@ -547,13 +552,16 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
         return "skip", "no strong echo over or heading for any region", set()
 
     changed = set()
-    warn, new, upgraded, vh, grouped, held_weak = [], [], [], [], [], []
+    warn, new, upgraded, vh, grouped, held_weak, held_tiny = [], [], [], [], [], [], []
     for h in hits:
         st = regs[h.name]
         rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
         if not st.get("active"):
             if weak_far(h):
                 held_weak.append(h.name)    # small weak rain still >= 30 min away: no post of its own yet
+                continue
+            if tiny_unconfirmed(h, state, now_utc):
+                held_tiny.append(h.name)    # tiny storm on one radar picture only so far
                 continue
             if h.status == "approaching" and _same_band_as_announced(h, regs, now_utc) \
                     and _mins(now_utc, _dt(state.get("last_post_utc"))) < GROUP_HOLD_MIN:
@@ -577,6 +585,8 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
             why += f"; held as the same band: {', '.join(grouped)}"
         if held_weak:
             why += f"; small weak rain still far: {', '.join(held_weak)}"
+        if held_tiny:
+            why += f"; tiny storm, waiting for the next radar picture: {', '.join(held_tiny)}"
         return "skip", why, set()
     summary = f"{len(warn)} newly approaching, {len(new)} new rain, {len(upgraded)} upgraded"
     if vh:
@@ -696,6 +706,30 @@ def persistence(h: Hit) -> str | None:
     if h.storm_nodes < BRIEF_MAX_NODES and h.storm_peak < BRIEF_MAX_PEAK:
         return "brief"
     return None
+
+
+def update_tiny_seen(hits: list, state: dict, now_utc: datetime) -> None:
+    """When each district's tiny-storm rain was first seen in the current unbroken run of cycles."""
+    old = state.get("tiny_first") or {}
+    new = {}
+    for h in hits:
+        if h.storm_nodes < BRIEF_MAX_NODES:
+            prev = old.get(h.name) or {}
+            run_on = _mins(now_utc, _dt(prev.get("last"))) <= PERSIST_MAX_AGE_MIN
+            new[h.name] = {"first": prev["first"] if run_on and prev.get("first") else now_utc.isoformat(),
+                           "last": now_utc.isoformat()}
+    for name, rec in old.items():        # keep a short gap from breaking the run
+        if name not in new and _mins(now_utc, _dt(rec.get("last"))) <= PERSIST_MAX_AGE_MIN:
+            new[name] = rec
+    state["tiny_first"] = new
+
+
+def tiny_unconfirmed(h: Hit, state: dict, now_utc: datetime) -> bool:
+    """Tiny storm not yet seen for TINY_CONFIRM_MIN (see that constant)."""
+    if h.storm_nodes >= BRIEF_MAX_NODES:
+        return False
+    first = _dt(((state.get("tiny_first") or {}).get(h.name) or {}).get("first"))
+    return first is None or _mins(now_utc, first) < TINY_CONFIRM_MIN
 
 
 def weak_far(h: Hit) -> bool:
@@ -1426,6 +1460,7 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
         state["weak_seen"] = {"t": now_utc.isoformat(), "names": a.weak}
         state["vh_seen"] = {"t": now_utc.isoformat(), "names": a.intense}
         state["heavy_seen"] = {"t": now_utc.isoformat(), "names": a.heavy}
+        update_tiny_seen(a.hits, state, now_utc)
 
     quiet_held = []
     if a.ok and not force and in_quiet_hours(now_utc):
@@ -1473,7 +1508,9 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
     png = None
     # 22 Oct 2026: small weak rain still >= 30 min away is not named (it arrived only ~55 % of the time) and is not marked
     # as announced, so it can still trigger its own post once it is close
-    shown = [h for h in a.hits if not weak_far(h)]
+    regs_seen = state.get("regions", {})
+    shown = [h for h in a.hits if not weak_far(h)
+             and (force or regs_seen.get(h.name, {}).get("active") or not tiny_unconfirmed(h, state, now_utc))]
     if a.hits and not shown:
         shown = a.hits
     if action == "send":
