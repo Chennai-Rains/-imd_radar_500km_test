@@ -3937,6 +3937,7 @@ BOT_NIOT_CHECK_KM: float = 6.0       # neighbourhood for the check (frames diffe
 BOT_NIOT_MARGIN_DB: float = 5.0      # NIOT may read this much above the Chennai DWR
 BOT_LONG_RANGE_PRODUCTS: tuple = ("cni_ppz", "kkl_ppz")   # see the cross-check block in export_bot_data()
 BOT_LONG_RANGE_MIN_CORE_DBZ: float = 45.0   # a far-only patch needs a core this strong to count
+BOT_LONG_RANGE_FAR_KM: float = 250.0       # ...beyond this distance from the radar
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
@@ -4220,7 +4221,11 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
         # 265-310 km out, 25-44 dBZ, nothing on Trivandrum or on the ground). Such a patch now counts only if it
         # holds a convective core (>= BOT_LONG_RANGE_MIN_CORE_DBZ); otherwise the whole patch is dropped.
         vals = regridded[p]
-        echo = np.isfinite(vals) & (vals > 0)
+        site = site_for(p)
+        far_ring = np.hypot((lat2d - site["site_lat"]) * 111.0,
+                            (lon2d - site["site_lon"]) * 111.0 * np.cos(np.radians(site["site_lat"]))) >= BOT_LONG_RANGE_FAR_KM
+        # only the far ring: when the sharper product is stale and the inner disc is released, that echo is low-level
+        echo = np.isfinite(vals) & (vals > 0) & far_ring
         if echo.any():
             lab, n = ndimage.label(echo, structure=np.ones((3, 3)))
             peaks = ndimage.maximum(np.where(echo, vals, 0), lab, index=np.arange(1, n + 1))
