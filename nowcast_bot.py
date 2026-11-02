@@ -2384,7 +2384,8 @@ PRODUCTS["mpt_maxz"] = {
 
 RADAR_MARKER_LABEL = {"niot": "NIOT X-DWR Chennai", "karaikal": "Karaikal DWR",
                        "kochi": "Kochi DWR", "trivandrum": "Trivandrum DWR",
-                       "visakhapatnam": "Visakhapatnam DWR", "machilipatnam": "Machilipatnam DWR"}
+                       "visakhapatnam": "Visakhapatnam DWR", "machilipatnam": "Machilipatnam DWR",
+                      "chennai": "Chennai DWR", "mangalore": "Mangaluru DWR"}
 
 # CARTO now requires an API key even for the free Voyager basemap tiles.
 # NOTE: this key travels in the tile URL itself, so it's visible to anyone
@@ -3082,6 +3083,43 @@ def build_home_button_html() -> str:
     """
 
 
+MAP_RADAR_CHOOSER = True                 # radar chooser on the map (3 Nov 2026)
+MAP_ALL_RADARS_LABEL = "All radars (combined)"
+MAP_CHOOSER_ORDER = ("chennai", "niot", "karaikal", "trivandrum", "kochi", "mangalore", "machilipatnam", "visakhapatnam")
+MAP_CHOOSER_COLLAPSED = True             # a layers button that opens on tap/hover, so phones keep the map clear
+
+
+def build_radar_chooser_html(map_var: str) -> str:
+    """Title for the radar chooser, and remembering the chosen radar across the page's timed reload. Browser
+    storage can be blocked (private windows, some embeds), so every access is guarded and the page simply opens
+    on "All radars" when it is."""
+    return f"""
+<style>
+.leaflet-control-layers-base::before {{ content: "Show radar"; display: block; font-weight: 600; margin-bottom: 4px; }}
+.leaflet-control-layers-expanded {{ font-size: 13px; max-height: 60vh; overflow-y: auto; }}
+</style>
+<script>
+document.addEventListener("DOMContentLoaded", function() {{
+  setTimeout(function() {{
+    var map = window["{map_var}"]; if (!map) return;
+    var KEY = "comk_radar_choice";
+    map.on("baselayerchange", function(e) {{ try {{ localStorage.setItem(KEY, e.name); }} catch (err) {{}} }});
+    var want = null; try {{ want = localStorage.getItem(KEY); }} catch (err) {{}}
+    if (!want) return;
+    var labels = document.querySelectorAll(".leaflet-control-layers-base label");
+    for (var i = 0; i < labels.length; i++) {{
+      if (labels[i].textContent.trim() === want) {{
+        var inp = labels[i].querySelector("input");
+        if (inp && !inp.checked) inp.click();
+        break;
+      }}
+    }}
+  }}, 300);
+}});
+</script>
+"""
+
+
 def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
                         lead_times_min: tuple = (30, 60, 90),
                         min_speed_kmh: float = 5.0,
@@ -3126,7 +3164,10 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
     center_lon = np.mean([RADAR_SITES[r]["site_lon"] for r in radars_shown])
     zoom = 9 if len(radars_shown) == 1 else 7
     m = folium.Map(location=[center_lat, center_lon], zoom_start=zoom, tiles=None)
-    folium.TileLayer(tiles=CARTO_VOYAGER_URL, attr=CARTO_ATTR, name="CARTO Voyager").add_to(m)
+    # overlay=True + control=False: the basemap always stays on and is not part of the radar chooser below
+    # (the radar views are the chooser's "base layers", and Leaflet hides every base layer but the chosen one).
+    folium.TileLayer(tiles=CARTO_VOYAGER_URL, attr=CARTO_ATTR, name="CARTO Voyager",
+                     overlay=True, control=False).add_to(m)
     # Every shape with a tooltip/popup (every cell marker, every forecast
     # cone) gets a tabindex from Leaflet for keyboard-accessibility, and
     # browsers draw their own default focus outline on click/hover -- a
@@ -3244,17 +3285,39 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
         print(f"[render] dropping stale product(s) from the map (>{STALE_OBS_MINUTES}min old): "
               f"{', '.join(stale_dropped)}")
 
-    rasters_to_draw = _mask_stale_overlap(
-        {p: a for p, a in _last_dbz.items() if p in fresh_products}, products)
-    for product in products:
-        if product not in rasters_to_draw:
-            continue
+    # 3 Nov 2026 (Srikanth): a radar chooser. "All radars" is the combined view as before (overlaps blended by
+    # _mask_stale_overlap, fused storm markers and arrows); each radar can also be shown on its own, with only its
+    # own picture (no blending from the others) and no storm markers. One choice at a time (radio buttons), so
+    # semi-transparent pictures never stack. The choice is remembered across the page's auto-refresh.
+    fresh_rasters = {p: a for p, a in _last_dbz.items() if p in fresh_products}
+    rasters_to_draw = _mask_stale_overlap(fresh_rasters, products)
+    radars_with_picture = []
+    for p in products:
+        if p in rasters_to_draw and PRODUCT_RADAR[p] not in radars_with_picture:
+            radars_with_picture.append(PRODUCT_RADAR[p])
+    radars_with_picture.sort(key=lambda r: MAP_CHOOSER_ORDER.index(r) if r in MAP_CHOOSER_ORDER else 99)
+    use_chooser = MAP_RADAR_CHOOSER and len(radars_with_picture) > 1
+    all_group = folium.FeatureGroup(name=MAP_ALL_RADARS_LABEL, overlay=False, show=True) if use_chooser else m
+
+    def _draw_raster(product, arr, target, suffix=""):
         style = PRODUCT_STYLE.get(product, {"label": product.upper()})
-        png_path = f"_forecast_overlay_{product}.png"
-        dbz_array_to_png(rasters_to_draw[product], product, png_path)
+        png_path = f"_forecast_overlay_{product}{suffix}.png"
+        dbz_array_to_png(arr, product, png_path)
         south, west, north, east = plot_bounds_latlon(product)
         ImageOverlay(image=png_path, bounds=[[south, west], [north, east]],
-                     opacity=0.7, name=f"{style['label']} reflectivity").add_to(m)
+                     opacity=0.7, name=f"{style['label']} reflectivity").add_to(target)
+
+    for product in products:
+        if product in rasters_to_draw:
+            _draw_raster(product, rasters_to_draw[product], all_group)
+    if use_chooser:
+        all_group.add_to(m)
+        for r in radars_with_picture:
+            own = [p for p in products if PRODUCT_RADAR[p] == r and p in fresh_rasters]
+            g = folium.FeatureGroup(name=RADAR_MARKER_LABEL.get(r, r), overlay=False, show=False)
+            for p in own:
+                _draw_raster(p, fresh_rasters[p], g, suffix="_own")
+            g.add_to(m)
 
     do_fuse = fuse and len({PRODUCT_RADAR[p] for p in products}) > 1
     if do_fuse:
@@ -3316,7 +3379,7 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
             fill=True, fill_color=fill_color, fill_opacity=0.3,
             popup=f"{label_prefix} #{c.id} — {c.max_dbz:.0f} dBZ now, trend: {c.trend}",
         )
-        circle.add_to(m)
+        circle.add_to(all_group)
         cell_marker_registry.append((circle.get_name(), area_km2, "circle"))
 
         if not c.velocity_kmh or c.velocity_kmh[0] < min_speed_kmh:
@@ -3357,7 +3420,7 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
             tooltip=f"{label_prefix} #{c.id} heading {bearing_deg:.0f}° "
                     f"at {speed_kmh:.0f} km/h",
         )
-        arrow.add_to(m)
+        arrow.add_to(all_group)
         cell_marker_registry.append((arrow.get_name(), area_km2, "marker"))
         n_projected += 1
 
@@ -3378,6 +3441,9 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
     m.get_root().script.add_child(folium.Element(build_autorefresh_script()))
     m.get_root().script.add_child(folium.Element(
         build_cell_zoom_declutter_script(m.get_name(), cell_marker_registry)))
+    if use_chooser:
+        folium.LayerControl(position="topleft", collapsed=MAP_CHOOSER_COLLAPSED).add_to(m)
+        m.get_root().html.add_child(folium.Element(build_radar_chooser_html(m.get_name())))
 
     if out_html:
         m.save(out_html)
