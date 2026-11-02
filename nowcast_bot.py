@@ -3932,7 +3932,7 @@ BOT_EXCLUDED_PRODUCTS: tuple = ()
 # PPI of the same radar at the same minute, which produced three false "Very heavy" alerts. If the PPI is missing or stale
 # this cycle the MAXZ simply stays in use.
 BOT_DEFER_TO: dict = {"cni_maxz": "cni_ppi"}
-BOT_NIOT_REFERENCES: tuple = ("cni_ppi", "cni_maxz")   # Chennai DWR products NIOT is checked against (1 Nov 2026)
+BOT_NIOT_REFERENCES: tuple = ("cni_ppi", "cni_maxz")   # Chennai DWR products NIOT is checked against, in order of trust (first that looks wins)
 BOT_NIOT_CHECK_KM: float = 6.0       # neighbourhood for the check (frames differ by up to ~10 min)
 BOT_NIOT_MARGIN_DB: float = 5.0      # NIOT may read this much above the Chennai DWR
 BOT_LONG_RANGE_PRODUCTS: tuple = ("cni_ppz", "kkl_ppz")   # see the cross-check block in export_bot_data()
@@ -4162,11 +4162,16 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     # median on 17 Oct; heavy cells 61 vs 58). So wherever a fresh Chennai DWR product looks, a NIOT node may not
     # exceed the strongest Chennai reading within BOT_NIOT_CHECK_KM by more than BOT_NIOT_MARGIN_DB (and drops to "no
     # echo" when that is below BOT_MIN_DBZ). When the Chennai DWR is missing or stale, NIOT is used as it is.
+    # 2 Nov 2026: the references are taken in ORDER of trust, not their maximum -- the PPI wherever it looks, Chennai
+    # MAXZ only beyond it. In stratiform rain both column-max products (NIOT, Chennai MAXZ) pick up the melting-layer
+    # bright band 3-4 km up: at 10:19 AM the PPI had no echo over Chennai/Tiruvallur land, Chennai MAXZ 20-30 dBZ with
+    # one 51 dBZ pixel, NIOT 99 nodes >= 35, so the old max-of-both cap still let NIOT through as "Moderate rain over
+    # Chennai and Tiruvallur" (10:47 AM post).
     refs = [regridded[q] for q in BOT_NIOT_REFERENCES if q in regridded]
     if "maxz" in regridded and refs:
         ref = np.full(lat2d.shape, np.nan)
         for r_ in refs:
-            ref = np.fmax(ref, r_)
+            ref = np.where(np.isfinite(ref), ref, r_)
         seen = np.isfinite(ref)
         rad = max(1, int(round(BOT_NIOT_CHECK_KM / (step * 111.0))))
         ref_near = ndimage.maximum_filter(np.where(seen, ref, -1.0), size=2 * rad + 1)
