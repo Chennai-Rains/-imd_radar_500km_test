@@ -3935,6 +3935,8 @@ BOT_DEFER_TO: dict = {"cni_maxz": "cni_ppi"}
 BOT_NIOT_REFERENCES: tuple = ("cni_ppi", "cni_maxz")   # Chennai DWR products NIOT is checked against, in order of trust (first that looks wins)
 BOT_NIOT_CHECK_KM: float = 6.0       # neighbourhood for the check (frames differ by up to ~10 min)
 BOT_NIOT_MARGIN_DB: float = 5.0      # NIOT may read this much above the Chennai DWR
+BOT_NIOT_REF_MAX_AGE_MIN: float = 90.0   # a late Chennai frame still serves as NIOT's reference up to this age (2 Nov 2026)
+BOT_NIOT_MOTION_KM_PER_MIN: float = 0.5  # neighbourhood widened by this per minute between the Chennai and NIOT frames
 BOT_LONG_RANGE_PRODUCTS: tuple = ("cni_ppz", "kkl_ppz")   # see the cross-check block in export_bot_data()
 BOT_LONG_RANGE_MIN_CORE_DBZ: float = 45.0   # a far-only patch needs a core this strong to count
 BOT_LONG_RANGE_FAR_KM: float = 250.0       # ...beyond this distance from the radar
@@ -4167,14 +4169,31 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     # bright band 3-4 km up: at 10:19 AM the PPI had no echo over Chennai/Tiruvallur land, Chennai MAXZ 20-30 dBZ with
     # one 51 dBZ pixel, NIOT 99 nodes >= 35, so the old max-of-both cap still let NIOT through as "Moderate rain over
     # Chennai and Tiruvallur" (10:47 AM post).
-    refs = [regridded[q] for q in BOT_NIOT_REFERENCES if q in regridded]
-    if "maxz" in regridded and refs:
-        ref = np.full(lat2d.shape, np.nan)
-        for r_ in refs:
-            ref = np.where(np.isfinite(ref), ref, r_)
-        seen = np.isfinite(ref)
-        rad = max(1, int(round(BOT_NIOT_CHECK_KM / (step * 111.0))))
-        ref_near = ndimage.maximum_filter(np.where(seen, ref, -1.0), size=2 * rad + 1)
+    # 2 Nov 2026 (5:51 PM post): IMD's Chennai images lagged -- at 12:21 UTC the newest Chennai PPI and MAXZ were from
+    # 11:39 (42 min, just past BOT_STALE_MINUTES) while NIOT's 11:43 frame was still "fresh", so NIOT ran unchecked
+    # and 757 nodes up to 59 dBZ over Tiruvallur / Kancheepuram / Chennai went out; the PPI before and after showed
+    # nothing over that land. A Chennai frame that is only LATE (up to BOT_NIOT_REF_MAX_AGE_MIN) still serves as the
+    # reference, with the neighbourhood widened for the time between it and the NIOT frame (storm motion).
+    if "maxz" in regridded:
+        niot_age = age_h.get("maxz", 0.0) * 60.0
+        ref_near = np.full(lat2d.shape, np.nan)
+        used_refs = []
+        for q in BOT_NIOT_REFERENCES:                 # in order of trust: the first that looks at a node decides it
+            if q in regridded:
+                g, q_age = regridded[q], age_h.get(q, 0.0) * 60.0
+            else:
+                obs_q = _last_obs_time_seen.get(q)
+                q_age = (now_utc - obs_q).total_seconds() / 60.0 if obs_q is not None else None
+                if q not in _last_dbz or q_age is None or q_age > BOT_NIOT_REF_MAX_AGE_MIN:
+                    continue
+                g = _bot_regrid_dbz(_last_dbz[q], q, lat2d, lon2d)
+            seen_q = np.isfinite(g)
+            radius_km = BOT_NIOT_CHECK_KM + BOT_NIOT_MOTION_KM_PER_MIN * abs(q_age - niot_age)
+            rad = max(1, int(round(radius_km / (step * 111.0))))
+            near_q = ndimage.maximum_filter(np.where(seen_q, g, -1.0), size=2 * rad + 1)
+            ref_near = np.where(np.isfinite(ref_near), ref_near, np.where(seen_q, near_q, np.nan))
+            used_refs.append(f"{q} {q_age:.0f} min")
+        seen = np.isfinite(ref_near)
         cap = ref_near + BOT_NIOT_MARGIN_DB
         niot = regridded["maxz"]
         over = seen & np.isfinite(niot) & (niot > cap)
@@ -4183,8 +4202,8 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             strong_before = int((np.isfinite(niot) & (niot >= 40)).sum())
             regridded["maxz"] = np.where(over, capped, niot)
             strong_after = int((np.isfinite(regridded["maxz"]) & (regridded["maxz"] >= 40)).sum())
-            print(f"[bot-export] maxz: {int(over.sum())} NIOT nodes held to the Chennai DWR "
-                  f"(>= 40 dBZ: {strong_before} -> {strong_after})")
+            print(f"[bot-export] maxz: {int(over.sum())} NIOT nodes held to the Chennai DWR ({', '.join(used_refs)}; "
+                  f">= 40 dBZ: {strong_before} -> {strong_after})")
 
     # ---- a radar's column-max picture defers to its own low-tilt PPI ----
     for weak, strong in BOT_DEFER_TO.items():
