@@ -2762,7 +2762,7 @@ def build_logo_tag(height_px: int = 26) -> str:
     )
 
 
-def build_info_banner_html(products: tuple, last_obs_time_seen: dict) -> str:
+def build_info_banner_html(products: tuple, last_obs_time_seen: dict, chooser: list | None = None) -> str:
     """A small fixed banner (top-right, where the layer toggle used to sit)
     showing each displayed product's most recent radar observation time --
     converted to IST, since the audience is chennairains.com's readers, not
@@ -2818,7 +2818,22 @@ def build_info_banner_html(products: tuple, last_obs_time_seen: dict) -> str:
                 lines.append(f"{label}: {local.strftime('%d %b, %H:%M')} IST")
         else:
             lines.append(f"{label}: time unavailable")
-    times_html = "<br>".join(lines)
+    if chooser:
+        # 3 Nov 2026 (Srikanth): the radar chooser lives in this banner. Each radar's line(s) pick that radar;
+        # "All radars" is the combined view. See build_radar_chooser_html for the switching.
+        rows = [f'<div class="comk-pick comk-on" data-radar="all" onclick="comkPickRadar(\'all\')">'
+                f'<span class="comk-dot"></span><b>{MAP_ALL_RADARS_LABEL}</b></div>']
+        for product, line in zip(products, lines):
+            r = PRODUCT_RADAR[product]
+            if r in chooser:
+                rows.append(f'<div class="comk-pick" data-radar="{r}" onclick="comkPickRadar(\'{r}\')">'
+                            f'<span class="comk-dot"></span>{line}</div>')
+            else:
+                rows.append(f'<div class="comk-plain">{line}</div>')
+        times_html = ('<div style="font-size:10px;color:#666;margin-bottom:2px;">Tap a radar to show it alone</div>'
+                      + "".join(rows))
+    else:
+        times_html = "<br>".join(lines)
     logo_tag = build_logo_tag()
     toggle_js = _collapsible_panel_toggle_js("nowcast-info-body", "nowcast-info-chevron")
     return f"""
@@ -3086,34 +3101,42 @@ def build_home_button_html() -> str:
 MAP_RADAR_CHOOSER = True                 # radar chooser on the map (3 Nov 2026)
 MAP_ALL_RADARS_LABEL = "All radars (combined)"
 MAP_CHOOSER_ORDER = ("chennai", "niot", "karaikal", "trivandrum", "kochi", "mangalore", "machilipatnam", "visakhapatnam")
-MAP_CHOOSER_COLLAPSED = True             # a layers button that opens on tap/hover, so phones keep the map clear
 
 
-def build_radar_chooser_html(map_var: str) -> str:
-    """Title for the radar chooser, and remembering the chosen radar across the page's timed reload. Browser
-    storage can be blocked (private windows, some embeds), so every access is guarded and the page simply opens
-    on "All radars" when it is."""
+def build_radar_chooser_html(map_var: str, groups: dict) -> str:
+    """Switching for the radar chooser in the info banner (build_info_banner_html): shows the chosen group, hides
+    the others, marks the chosen line(s), and remembers the choice across the page's timed reload. Browser storage
+    can be blocked (private windows, some embeds), so every access is guarded and the page then opens on "all"."""
+    groups_js = ",".join(f'"{k}":"{v}"' for k, v in groups.items())
     return f"""
 <style>
-.leaflet-control-layers-base::before {{ content: "Show radar"; display: block; font-weight: 600; margin-bottom: 4px; }}
-.leaflet-control-layers-expanded {{ font-size: 13px; max-height: 60vh; overflow-y: auto; }}
+.comk-pick {{ cursor: pointer; padding: 1px 4px; margin: 0 -4px; border-radius: 4px; }}
+.comk-pick:hover {{ background: rgba(37,99,235,0.08); }}
+.comk-pick.comk-on {{ background: rgba(37,99,235,0.14); }}
+.comk-dot {{ display: inline-block; width: 8px; height: 8px; border: 1.5px solid #2563eb; border-radius: 50%;
+            margin-right: 5px; vertical-align: 0; box-sizing: border-box; }}
+.comk-on .comk-dot {{ background: #2563eb; }}
+.comk-plain {{ padding-left: 13px; }}
 </style>
 <script>
+window.comkPickRadar = function(key, noSave) {{
+  var map = window["{map_var}"]; if (!map) return;
+  var groups = {{{groups_js}}};
+  if (!groups[key]) key = "all";
+  for (var k in groups) {{
+    var g = window[groups[k]]; if (!g) continue;
+    if (k === key) {{ if (!map.hasLayer(g)) map.addLayer(g); }} else if (map.hasLayer(g)) {{ map.removeLayer(g); }}
+  }}
+  var rows = document.querySelectorAll(".comk-pick");
+  for (var i = 0; i < rows.length; i++) {{
+    rows[i].classList.toggle("comk-on", rows[i].getAttribute("data-radar") === key);
+  }}
+  if (!noSave) {{ try {{ localStorage.setItem("comk_radar_choice", key); }} catch (err) {{}} }}
+}};
 document.addEventListener("DOMContentLoaded", function() {{
   setTimeout(function() {{
-    var map = window["{map_var}"]; if (!map) return;
-    var KEY = "comk_radar_choice";
-    map.on("baselayerchange", function(e) {{ try {{ localStorage.setItem(KEY, e.name); }} catch (err) {{}} }});
-    var want = null; try {{ want = localStorage.getItem(KEY); }} catch (err) {{}}
-    if (!want) return;
-    var labels = document.querySelectorAll(".leaflet-control-layers-base label");
-    for (var i = 0; i < labels.length; i++) {{
-      if (labels[i].textContent.trim() === want) {{
-        var inp = labels[i].querySelector("input");
-        if (inp && !inp.checked) inp.click();
-        break;
-      }}
-    }}
+    var want = null; try {{ want = localStorage.getItem("comk_radar_choice"); }} catch (err) {{}}
+    window.comkPickRadar(want || "all", true);
   }}, 300);
 }});
 </script>
@@ -3297,7 +3320,8 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
             radars_with_picture.append(PRODUCT_RADAR[p])
     radars_with_picture.sort(key=lambda r: MAP_CHOOSER_ORDER.index(r) if r in MAP_CHOOSER_ORDER else 99)
     use_chooser = MAP_RADAR_CHOOSER and len(radars_with_picture) > 1
-    all_group = folium.FeatureGroup(name=MAP_ALL_RADARS_LABEL, overlay=False, show=True) if use_chooser else m
+    all_group = folium.FeatureGroup(name=MAP_ALL_RADARS_LABEL, show=True) if use_chooser else m
+    chooser_groups = {}
 
     def _draw_raster(product, arr, target, suffix=""):
         style = PRODUCT_STYLE.get(product, {"label": product.upper()})
@@ -3312,12 +3336,14 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
             _draw_raster(product, rasters_to_draw[product], all_group)
     if use_chooser:
         all_group.add_to(m)
+        chooser_groups["all"] = all_group.get_name()
         for r in radars_with_picture:
             own = [p for p in products if PRODUCT_RADAR[p] == r and p in fresh_rasters]
-            g = folium.FeatureGroup(name=RADAR_MARKER_LABEL.get(r, r), overlay=False, show=False)
+            g = folium.FeatureGroup(name=RADAR_MARKER_LABEL.get(r, r), show=False)
             for p in own:
                 _draw_raster(p, fresh_rasters[p], g, suffix="_own")
             g.add_to(m)
+            chooser_groups[r] = g.get_name()
 
     do_fuse = fuse and len({PRODUCT_RADAR[p] for p in products}) > 1
     if do_fuse:
@@ -3430,7 +3456,8 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
 
     if any(p in _last_dbz for p in products):
         m.get_root().html.add_child(folium.Element(build_dbz_legend_html(products)))
-        m.get_root().html.add_child(folium.Element(build_info_banner_html(products, _last_obs_time_seen)))
+        m.get_root().html.add_child(folium.Element(build_info_banner_html(
+            products, _last_obs_time_seen, chooser=radars_with_picture if use_chooser else None)))
     else:
         # No reflectivity yet to anchor the info banner to -- show the logo
         # on its own so branding is still present on every map.
@@ -3442,8 +3469,7 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
     m.get_root().script.add_child(folium.Element(
         build_cell_zoom_declutter_script(m.get_name(), cell_marker_registry)))
     if use_chooser:
-        folium.LayerControl(position="topleft", collapsed=MAP_CHOOSER_COLLAPSED).add_to(m)
-        m.get_root().html.add_child(folium.Element(build_radar_chooser_html(m.get_name())))
+        m.get_root().html.add_child(folium.Element(build_radar_chooser_html(m.get_name(), chooser_groups)))
 
     if out_html:
         m.save(out_html)
