@@ -4310,7 +4310,10 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             entry.update(status="excluded", used=False, motion="no motion: left out of the bot export")
         elif p in degraded:
             entry.update(status="degraded", used=False, motion="no motion: " + degraded[p])
-        elif p in BOT_BACKUP_FOR and any(q in fresh for q in BOT_BACKUP_FOR[p]):
+        elif (p in BOT_BACKUP_FOR and any(q in fresh for q in BOT_BACKUP_FOR[p])
+              and not any(q in degraded for q in BOT_BACKUP_FOR[p])):
+            # 4 Nov 2026 (Srikanth): while a primary is degraded (the Chennai PPI after the late-Oct maintenance), the
+            # backup is switched on as a second opinion instead -- held to the healthy primary by the NIOT check below.
             # 2 Nov 2026 (Srikanth): NIOT is a backup only. Over 1-2 Nov it read 15-25 dB above the Chennai DWR
             # (bright band, radial streaks) and drove false Chennai alerts three times.
             entry.update(status="standby", used=False, motion="no motion: backup only, the Chennai DWR is in use")
