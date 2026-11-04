@@ -99,17 +99,29 @@ jobs:
       - name: Commit updated tracking state + frame archive
         # Needed for direction arrows: track_cells() compares this run's
         # cells against the PREVIOUS run's (state_500km_test/prev_cells.json)
-        # to compute velocity_kmh -- without persisting these between runs,
-        # every run looks like the first one ever, velocity_kmh is always
-        # None, and no arrow can ever be drawn no matter what the
-        # arrow-drawing code does.
-        uses: stefanzweifel/git-auto-commit-action@v5
+        # to compute velocity_kmh -- and for the alerts: state_social_test/
+        # holds when the last post went out, so the next run respects the
+        # posting gaps.
+        # 4 Nov 2026: was stefanzweifel/git-auto-commit-action, which tries the push once. At 3:06 PM IST GitHub
+        # answered "remote: fatal error in commit_refs", the push was lost (continue-on-error), and the 3:16 PM
+        # run -- not knowing about the 3:06 post -- posted again 10 minutes later. Now the push is retried up to
+        # 6 times, re-syncing with main in between; this run's own state wins any clash.
         continue-on-error: true
-        with:
-          commit_message: "Update 500km test tracking state"
-          file_pattern: "state_500km_test/ archive_500km_test/ state_social_test/"
-          commit_user_name: "nowcast-bot"
-          commit_user_email: "actions@users.noreply.github.com"
+        run: |
+          git config user.name "nowcast-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A state_500km_test/ archive_500km_test/ state_social_test/
+          if git diff --cached --quiet; then echo "Nothing to commit."; exit 0; fi
+          git commit -q -m "Update 500km test tracking state"
+          for i in 1 2 3 4 5 6; do
+            if git push origin HEAD:main; then echo "Pushed on attempt $i."; exit 0; fi
+            echo "Push attempt $i failed; re-syncing with main and retrying."
+            sleep $((i * 5))
+            git fetch origin main
+            if ! git rebase -X theirs origin/main; then git rebase --abort || true; fi
+          done
+          echo "::error::State push failed after 6 attempts -- the next run will not know about this run's post."
+          exit 1
 
       - name: Upload test map to a NEW file (does not touch the live storm_forecast_map.html)
         # IMPORTANT: this deploys into the SAME remote folder the live
