@@ -4053,6 +4053,50 @@ BOT_NIOT_REFERENCES: tuple = ("cni_ppi", "cni_maxz")   # Chennai DWR products NI
 # A backup radar is left out of the bot export whenever any of its primaries has a fresh frame. If the primaries are
 # only late (up to BOT_NIOT_REF_MAX_AGE_MIN) it is used, held to them (the NIOT check below); if they are down, in full.
 BOT_BACKUP_FOR: dict = {"maxz": ("cni_ppi", "cni_maxz")}
+# 4 Nov 2026: health check of the Chennai PPI against its own radar's MAXZ (radar_pairs.jsonl, written every run by
+# radar_pair_log.py). Before the late-Oct maintenance, where Chennai MAXZ read >= 36 dBZ within 90 km the PPI read
+# >= 36 at 26-42 % of those nodes and showed no echo at 16-24 %; from 31 Oct it read >= 36 at 0-2 % and no echo at
+# 65-85 % -- the 0.2 deg scan is badly under-reading (MAXZ and NIOT both see the storms). On 4 Nov afternoon that
+# hid thunderstorms over Chennai's suburbs: NIOT was on standby and the PPI replaced Chennai MAXZ, so no alert.
+# The PPI is left out of the bot export while, over the most recent BOT_PPI_HEALTH_MIN_NODES such MAXZ nodes (up to
+# BOT_PPI_HEALTH_DAYS back), it reads >= 36 at fewer than BOT_PPI_HEALTH_MIN_SHARE of them. It returns by itself
+# once it recovers. Chennai MAXZ then stands in for it (NIOT stays the backup, held to Chennai MAXZ).
+BOT_PPI_HEALTH = {"cni_ppi": "cni_maxz"}
+BOT_PPI_HEALTH_LOG = Path("state_social_test/radar_pairs.jsonl")
+BOT_PPI_HEALTH_MIN_NODES = 300
+BOT_PPI_HEALTH_DAYS = 7
+BOT_PPI_HEALTH_MIN_SHARE = 0.10
+
+
+def _bot_degraded_products() -> dict:
+    """{product: reason} for PPIs currently failing the health check above. Any problem reading the log -> {}."""
+    out = {}
+    try:
+        if not BOT_PPI_HEALTH_LOG.exists():
+            return out
+        lines = BOT_PPI_HEALTH_LOG.read_text().splitlines()[-3000:]
+        cutoff = datetime.now(timezone.utc) - timedelta(days=BOT_PPI_HEALTH_DAYS)
+        n = strong = 0
+        for line in reversed(lines):
+            r = json.loads(line)
+            if datetime.fromisoformat(r["t"]) < cutoff:
+                break
+            for band in ("0-45", "45-90"):
+                for k, v in r.get("bands", {}).get(band, {}).get("joint_ppi_maxz", {}).items():
+                    pi, mi = map(int, k.split(","))
+                    if mi >= 4:              # MAXZ >= 36 dBZ (4 dB bins from 20)
+                        n += v
+                        strong += v if pi >= 4 else 0
+            if n >= BOT_PPI_HEALTH_MIN_NODES:
+                break
+        if n >= BOT_PPI_HEALTH_MIN_NODES and strong / n < BOT_PPI_HEALTH_MIN_SHARE:
+            for ppi, mx in BOT_PPI_HEALTH.items():
+                out[ppi] = (f"under-reading against {mx}: >= 36 dBZ at {strong / n:.0%} of {n} recent nodes "
+                            f"where {mx} has >= 36 (needs {BOT_PPI_HEALTH_MIN_SHARE:.0%})")
+                print(f"[bot-export] {ppi} left out: {out[ppi]}")
+    except Exception as e:
+        print(f"[bot-export] PPI health check skipped: {e!r}")
+    return out
 BOT_NIOT_CHECK_KM: float = 6.0       # neighbourhood for the check (frames differ by up to ~10 min)
 BOT_NIOT_MARGIN_DB: float = 5.0      # NIOT may read this much above the Chennai DWR
 BOT_NIOT_REF_MAX_AGE_MIN: float = 90.0   # a late Chennai frame still serves as NIOT's reference up to this age (2 Nov 2026)
@@ -4243,6 +4287,8 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     now_utc = now_utc or datetime.now(timezone.utc)
     included = tuple(p for p in products if p not in BOT_EXCLUDED_PRODUCTS)
     fresh = _bot_fresh_products(included, now_utc)
+    degraded = _bot_degraded_products()
+    fresh = [p for p in fresh if p not in degraded]
     lats, lons = _bot_grid_axes(included or products)
     lat2d, lon2d = np.meshgrid(lats, lons, indexing="ij")
     step = BOT_GRID_STEP_DEG
@@ -4262,6 +4308,8 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
         }
         if p in BOT_EXCLUDED_PRODUCTS:
             entry.update(status="excluded", used=False, motion="no motion: left out of the bot export")
+        elif p in degraded:
+            entry.update(status="degraded", used=False, motion="no motion: " + degraded[p])
         elif p in BOT_BACKUP_FOR and any(q in fresh for q in BOT_BACKUP_FOR[p]):
             # 2 Nov 2026 (Srikanth): NIOT is a backup only. Over 1-2 Nov it read 15-25 dB above the Chennai DWR
             # (bright band, radial streaks) and drove false Chennai alerts three times.
@@ -4303,6 +4351,8 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
         ref_near = np.full(lat2d.shape, np.nan)
         used_refs = []
         for q in BOT_NIOT_REFERENCES:                 # in order of trust: the first that looks at a node decides it
+            if q in degraded:
+                continue
             if q in regridded:
                 g, q_age = regridded[q], age_h.get(q, 0.0) * 60.0
             else:
