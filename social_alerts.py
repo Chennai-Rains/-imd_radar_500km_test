@@ -88,9 +88,9 @@ MIN_REGION_COVERAGE = 0.5  # share of a region inside radar coverage; no coverag
 CLEAR_AFTER_MIN = 60       # a region must be quiet this long before rain there is a NEW episode (was 30: pauses re-announced the same rain)
 DISTRICT_MIN_GAP_MIN = 60  # a district already announced is upgraded (Moderate -> Heavy) at most once an hour ...
 GLOBAL_MIN_GAP_MIN = 20    # minimum time between any two posts (was 30) ...
-PRIORITY_GAP_MIN = 10      # ... but a NEWLY APPROACHING district (arrival >= IMMINENT_MIN away) may post 10 min after the last post
+PRIORITY_GAP_MIN = 10      # ... but a post triggered by HEAVY rain may go 10 min after the last post (5 Nov 2026; was any newly approaching district)
 MAX_POSTS_PER_HOUR = 2     # at most this many posts in any rolling 60 minutes ...
-PRIORITY_MAX_PER_HOUR = 3  # ... a newly approaching district may use a third
+PRIORITY_MAX_PER_HOUR = 3  # ... and Heavy rain may use a third post in the hour (5 Nov 2026; was any newly approaching district)
 GROUP_RADIUS_KM = 40.0     # a newly approaching district whose rain is within this distance of rain in a district announced
 GROUP_HOLD_MIN = 30        # in the last hour is the same band: it waits until this long after the last post (rides along meanwhile)
 # 21 Oct 2026, from 14-21 Oct data (storm-trend notes): rain from a medium/large storm peaking >= 50 dBZ was still there an hour
@@ -104,6 +104,13 @@ WEAK_FAR_LEAD_MIN = 30
 # updates every 10 min). Karur 30 Oct 10:16 PM and 27 Oct 7:26 AM, Nagapattinam 26 Oct 10:11 AM / 10:16 PM: all
 # single-picture blips, gone 10 min later. Tiny storms that last are posted ~5-10 min later instead.
 TINY_CONFIRM_MIN = 8
+# 5 Nov 2026 (Srikanth): alert UNITS. The Chennai area keeps one unit per district, so a storm reaching the city is
+# never folded into rain already announced in a neighbouring district; the rest of Tamil Nadu is counted by the fixed
+# 100 x 100 km grid squares the pictures already use (grid_cell), so one storm across two or three districts counts
+# once. A district change only TRIGGERS a post when its unit is new in this episode or steps up in category; other
+# changes ride along in the next post. Replay 30 Oct - 5 Nov: 94-96 posts instead of 110-118, busiest day 22-23
+# instead of 28-31, and Chennai-area rain reached a post as quickly as before (43 of 48 episodes within 20 min).
+DISTRICT_UNITS = ("Chennai", "Tiruvallur", "Chengalpattu", "Kancheepuram")
 IMMINENT_MIN = 15          # arrival this soon: "likely to begin shortly" (the radar picture is ~30 min old; no window that fine)
 # ... EXCEPT a Very heavy spell (a district newly Very heavy, or upgraded to it), which is always announced at once
 MAX_POSTS_PER_DAY = None   # no daily cap (removed 7 Oct: it blocked the afternoon storms); set a number to re-enable
@@ -579,6 +586,24 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
             upgraded.append(h.name); changed.add(h.name); vh.append(h.name)
         elif rank > st.get("last_rank", 0) and _mins(now_utc, _dt(st.get("last_post"))) >= district_gap:
             upgraded.append(h.name); changed.add(h.name)
+    # ---- alert units (see DISTRICT_UNITS): what may trigger a post ----
+    units = state.setdefault("units", {})
+    seen_units = set()
+    for h in hits:
+        u = units.setdefault(alert_unit(h), {"rank": 0, "announced": False})
+        u["last_hit"] = now_utc.isoformat()
+        seen_units.add(alert_unit(h))
+    for key in list(units):
+        if key not in seen_units and _mins(now_utc, _dt(units[key].get("last_hit"))) >= CLEAR_AFTER_MIN:
+            del units[key]                                      # quiet for an hour: a new episode next time
+    by_name = {h.name: h for h in hits}
+    triggers = [n for n in changed
+                if not units[alert_unit(by_name[n])]["announced"] or category(by_name[n]) > units[alert_unit(by_name[n])]["rank"]
+                or n in vh]
+    riding = sorted(changed - set(triggers))
+    if changed and not triggers:
+        return "skip", f"same area already announced, riding along next time: {', '.join(riding)}", set()
+
     if not changed:
         why = f"nothing new: {len(hits)} active region(s) already announced (rain continuing)"
         if grouped:
@@ -589,10 +614,15 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
             why += f"; tiny storm, waiting for the next radar picture: {', '.join(held_tiny)}"
         return "skip", why, set()
     summary = f"{len(warn)} newly approaching, {len(new)} new rain, {len(upgraded)} upgraded"
+    if riding:
+        summary += f" (riding along: {', '.join(riding)})"
     if vh:
         return "send", f"VERY HEAVY: {', '.join(vh)} ({summary})", changed
     gap = _mins(now_utc, _dt(state.get("last_post_utc")))
-    need_gap, cap = (min(global_gap, PRIORITY_GAP_MIN), max(max_per_hour, PRIORITY_MAX_PER_HOUR)) if warn else (global_gap, max_per_hour)
+    # 5 Nov 2026 (Srikanth): the shorter gap and the third post in an hour are only for Heavy rain (was: any newly
+    # approaching district -- three Delta posts in 44 min, 4:02-4:46 AM).
+    heavy_trigger = any(category(by_name[n]) >= 2 for n in triggers)
+    need_gap, cap = (min(global_gap, PRIORITY_GAP_MIN), max(max_per_hour, PRIORITY_MAX_PER_HOUR)) if heavy_trigger else (global_gap, max_per_hour)
     if gap < need_gap:
         return "skip", f"{len(changed)} change(s) waiting, last post was {gap:.0f} min ago (< {need_gap:.0f})", set()
     recent = [t for t in state.get("post_times", []) if _mins(now_utc, _dt(t)) < 60]
@@ -985,6 +1015,14 @@ CELL_PAD_KM = 10.0                    # frame = cell + this margin, so echo on a
 MAP_TOWNS_MAX = 7
 _GRID_DLAT = GRID_KM / 111.195
 _GRID_DLON = GRID_KM / (111.195 * math.cos(math.radians(GRID_REF_LAT)))
+
+
+def alert_unit(h) -> str:
+    """The unit a district's rain is counted in for triggering posts (see DISTRICT_UNITS)."""
+    if h.name in DISTRICT_UNITS:
+        return h.name
+    i, j = grid_cell(h.lat, h.lon)
+    return f"grid {i},{j}"
 
 
 def grid_cell(lat: float, lon: float) -> tuple[int, int]:
@@ -1538,6 +1576,8 @@ def run(json_path, grid_path, state_dir, now_utc: datetime | None = None,
                 rank = category(h)     # Moderate -> Heavy -> Very heavy counts as an upgrade
                 regs[h.name].update(active=True, last_post=now_utc.isoformat(), last_status=h.status, last_rank=rank,
                                     last_lat=round(h.lat, 3), last_lon=round(h.lon, 3))
+                u = state.setdefault("units", {}).setdefault(alert_unit(h), {"rank": 0})
+                u.update(announced=True, rank=max(u.get("rank", 0), rank), last_hit=u.get("last_hit") or now_utc.isoformat())
             state["last_post_utc"] = now_utc.isoformat()
             state["post_times"] = [t for t in state.get("post_times", []) if _mins(now_utc, _dt(t)) < 120] + [now_utc.isoformat()]
             today = now_utc.astimezone(IST).strftime("%Y-%m-%d")
