@@ -1,0 +1,25 @@
+name: Diagnose hosting (one-off, manual)
+# 6 Nov 2026: both live maps blank. Reads the live pages and lists the remote files with their sizes.
+on:
+  workflow_dispatch:
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Live pages as served
+        run: |
+          for u in storm_forecast_map.html storm_forecast_map_500km_test.html; do
+            curl -sS -o "$u" -D "$u.hdr" --max-time 60 "https://plots.chennairains.com/$u?nc=$RANDOM" || true
+            echo "== $u: $(wc -c < "$u") bytes"; grep -iE "^(HTTP|content-length|cf-cache-status|last-modified|age):" "$u.hdr" || true
+            echo "-- last 200 chars:"; tail -c 200 "$u"; echo
+          done
+      - name: Remote file sizes
+        env:
+          H: ${{ secrets.FTP_HOST }}
+          U: ${{ secrets.FTP_USERNAME }}
+          P: ${{ secrets.FTP_PASSWORD }}
+          D: ${{ secrets.FTP_REMOTE_DIR }}
+        run: |
+          curl -sS --ssl-reqd --max-time 60 -u "$U:$P" "ftp://$H/${D#/}" | grep -E "storm_forecast|nowcast_bot|radar_loop|\.ftp-deploy" || true
+          echo "-- quota (if the server reports it):"
+          curl -sS --ssl-reqd --max-time 30 -u "$U:$P" "ftp://$H/" -Q "SITE QUOTA" 2>&1 | tail -3 || true
