@@ -123,7 +123,16 @@ jobs:
           echo "::error::State push failed after 6 attempts -- the next run will not know about this run's post."
           exit 1
 
-      - name: Upload test map to a NEW file (does not touch the live storm_forecast_map.html)
+      - name: Publish this map as the live map too
+        # 6 Nov 2026 (Srikanth): one pipeline instead of two, to cut the uploads to a struggling host. This repo
+        # now also writes the LIVE storm_forecast_map.html (all its radars and the radar menu); the production repo
+        # (Chennai-Rains/IMD_Radar_Updates) is switched off and kept as a fallback.
+        if: ${{ !cancelled() }}
+        run: |
+          [ -f output/storm_forecast_map_500km_test.html ] && cp output/storm_forecast_map_500km_test.html output/storm_forecast_map.html
+          ls -la output/
+
+      - name: Upload the maps (live storm_forecast_map.html + the _500km_test copy) and the bot files
         # IMPORTANT: this deploys into the SAME remote folder the live
         # IMD_Radar_Updates repo deploys storm_forecast_map.html into.
         # FTP-Deploy-Action tracks what it's deployed via a small state
