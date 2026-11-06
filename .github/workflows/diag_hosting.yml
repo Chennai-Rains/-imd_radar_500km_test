@@ -16,6 +16,16 @@ jobs:
             done
             echo "-- last 200 chars:"; tail -c 200 "$u"; echo
           done
+      - name: CDN scripts the map needs
+        run: |
+          for u in https://cdn.jsdelivr.net/npm/leaflet@1.9.3/dist/leaflet.js https://code.jquery.com/jquery-3.7.1.min.js https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/js/bootstrap.bundle.min.js https://cdnjs.cloudflare.com/ajax/libs/Leaflet.awesome-markers/2.0.2/leaflet.awesome-markers.js; do
+            curl -sS -o /dev/null -w "%{http_code} %{size_download} B %{time_total}s  $u\n" --max-time 30 "$u" || echo "FAILED $u"
+          done
+      - name: Is the live page complete?
+        run: |
+          curl -sS -o live.html --max-time 60 "https://plots.chennairains.com/storm_forecast_map.html?nc=$RANDOM"
+          echo "bytes: $(wc -c < live.html)"; echo "ends with </html>: $(tail -c 20 live.html | grep -c '</html>')"
+          echo "map init present: $(grep -c 'L.map(' live.html)"; echo "-- last 300 chars:"; tail -c 300 live.html; echo
       - name: Remote file sizes
         env:
           H: ${{ secrets.FTP_HOST }}
