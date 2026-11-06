@@ -9,8 +9,11 @@ jobs:
       - name: Live pages as served
         run: |
           for u in storm_forecast_map.html storm_forecast_map_500km_test.html; do
-            curl -sS -o "$u" -D "$u.hdr" --max-time 60 "https://plots.chennairains.com/$u?nc=$RANDOM" || true
-            echo "== $u: $(wc -c < "$u") bytes"; grep -iE "^(HTTP|content-length|cf-cache-status|last-modified|age):" "$u.hdr" || true
+            for k in 1 2 3; do   # plain URL (as visitors load it), three times in a row: MISS then HIT if edge-cached
+              curl -sS -o "$u" -D "$u.hdr" --max-time 60 "https://plots.chennairains.com/$u" || true
+              echo "== $u try $k: $(wc -c < "$u") bytes"; grep -iE "^(HTTP|cf-cache-status|last-modified|age|cache-control|expires):" "$u.hdr" || true
+              sleep 3
+            done
             echo "-- last 200 chars:"; tail -c 200 "$u"; echo
           done
       - name: Remote file sizes
