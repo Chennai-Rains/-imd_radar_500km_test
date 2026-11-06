@@ -129,7 +129,15 @@ jobs:
         # (Chennai-Rains/IMD_Radar_Updates) is switched off and kept as a fallback.
         if: ${{ !cancelled() }}
         run: |
-          [ -f output/storm_forecast_map_500km_test.html ] && cp output/storm_forecast_map_500km_test.html output/storm_forecast_map.html
+          # 6 Nov 2026: uploads take minutes on the slow host and FTP overwrites the live file IN PLACE, so a visitor
+          # (and Cloudflare's cache) could get a half-written page -- banner and legend but no map. The page now goes
+          # up as storm_forecast_map.next.html and is renamed over the live file only once complete (step below).
+          # The _500km_test address becomes a small permanent redirect to the live map.
+          [ -f output/storm_forecast_map_500km_test.html ] && mv output/storm_forecast_map_500km_test.html output/storm_forecast_map.next.html
+          rm -f output/storm_forecast_map.html
+          cat > output/storm_forecast_map_500km_test.html <<'HTML'
+          <!doctype html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=storm_forecast_map.html"><link rel="canonical" href="storm_forecast_map.html"><title>Radar nowcast</title></head><body><a href="storm_forecast_map.html">Radar nowcast map</a></body></html>
+          HTML
           ls -la output/
 
       - name: Upload the maps (live storm_forecast_map.html + the _500km_test copy) and the bot files
@@ -181,6 +189,7 @@ jobs:
         # from the live repo's, so it only ever reasons about (and can
         # only ever delete) files IT has uploaded. See git history for
         # what happened the one time this wasn't set.
+        id: upload2
         if: ${{ !cancelled() && steps.upload1.outcome == 'failure' }}
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
@@ -196,3 +205,22 @@ jobs:
           # this only ever adds/overwrites storm_forecast_map_500km_test.html.
           dangerous-clean-slate: false
           timeout: 120000   # 6 Nov 2026: the host often takes > 30 s (the default) to answer; uploads died at exactly 30 s
+
+      - name: Swap the new page in (rename over the live file)
+        if: ${{ !cancelled() && (steps.upload1.outcome == 'success' || steps.upload2.outcome == 'success') }}
+        continue-on-error: true
+        env:
+          H: ${{ secrets.FTP_HOST }}
+          U: ${{ secrets.FTP_USERNAME }}
+          P: ${{ secrets.FTP_PASSWORD }}
+          D: ${{ secrets.FTP_REMOTE_DIR }}
+        run: |
+          d="${D#./}"; d="${d#/}"; d="${d%/}"; [ -n "$d" ] && d="/$d"
+          # -k: the host's FTPS certificate does not name it (FTP-Deploy-Action's default "loose" mode accepts the same)
+          ftp() { curl -sS --ssl-reqd -k --max-time 120 -u "$U:$P" "ftp://$H$d/" -o /dev/null "$@"; }
+          if ftp -Q "RNFR $d/storm_forecast_map.next.html" -Q "RNTO $d/storm_forecast_map.html"; then
+            echo "Live map swapped in."
+          else
+            echo "Rename over the existing file refused; deleting then renaming."
+            ftp -Q "DELE $d/storm_forecast_map.html" -Q "RNFR $d/storm_forecast_map.next.html" -Q "RNTO $d/storm_forecast_map.html" && echo "Live map swapped in (delete + rename)."
+          fi
