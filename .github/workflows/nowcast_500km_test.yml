@@ -135,7 +135,43 @@ jobs:
         # from the live repo's, so it only ever reasons about (and can
         # only ever delete) files IT has uploaded. See git history for
         # what happened the one time this wasn't set.
+        id: upload1
+        continue-on-error: true
         if: ${{ !cancelled() }}
+        uses: SamKirkland/FTP-Deploy-Action@v4.3.5
+        with:
+          server: ${{ secrets.FTP_HOST }}
+          username: ${{ secrets.FTP_USERNAME }}
+          password: ${{ secrets.FTP_PASSWORD }}
+          port: 21
+          protocol: ftps
+          local-dir: ./output/
+          server-dir: ${{ secrets.FTP_REMOTE_DIR }}
+          state-name: .ftp-deploy-sync-state-500km-test.json
+          # Never delete anything already sitting in that remote folder --
+          # this only ever adds/overwrites storm_forecast_map_500km_test.html.
+          dangerous-clean-slate: false
+
+      - name: Wait before retrying the upload
+        # 6 Nov 2026: test uploads kept timing out ~30 s in ("Timeout (control/data socket)") while production's,
+        # started on the same 5-min tick, succeeded -- most likely the host's limit on simultaneous FTP sessions
+        # for one account. On a failure, wait for production's upload to finish and try once more.
+        if: ${{ !cancelled() && steps.upload1.outcome == 'failure' }}
+        run: sleep 75
+
+      - name: Retry the test map upload
+        # IMPORTANT: this deploys into the SAME remote folder the live
+        # IMD_Radar_Updates repo deploys storm_forecast_map.html into.
+        # FTP-Deploy-Action tracks what it's deployed via a small state
+        # file it stores IN that same remote folder
+        # (.ftp-deploy-sync-state.json by default) -- and it treats any
+        # file listed in that state but missing from this run's local-dir
+        # as something to DELETE from the server. A distinct state-name
+        # keeps this workflow's own tracked-file list completely separate
+        # from the live repo's, so it only ever reasons about (and can
+        # only ever delete) files IT has uploaded. See git history for
+        # what happened the one time this wasn't set.
+        if: ${{ !cancelled() && steps.upload1.outcome == 'failure' }}
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.FTP_HOST }}
