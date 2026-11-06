@@ -151,6 +151,7 @@ jobs:
           # Never delete anything already sitting in that remote folder --
           # this only ever adds/overwrites storm_forecast_map_500km_test.html.
           dangerous-clean-slate: false
+          timeout: 120000   # 6 Nov 2026: the host often takes > 30 s (the default) to answer; uploads died at exactly 30 s
 
       - name: Wait before retrying the upload
         # 6 Nov 2026: test uploads kept timing out ~30 s in ("Timeout (control/data socket)") while production's,
@@ -185,3 +186,4 @@ jobs:
           # Never delete anything already sitting in that remote folder --
           # this only ever adds/overwrites storm_forecast_map_500km_test.html.
           dangerous-clean-slate: false
+          timeout: 120000   # 6 Nov 2026: the host often takes > 30 s (the default) to answer; uploads died at exactly 30 s
