@@ -3145,6 +3145,33 @@ MAP_ALL_RADARS_LABEL = "All radars (combined)"
 MAP_CHOOSER_ORDER = ("chennai", "niot", "karaikal", "trivandrum", "kochi", "mangalore", "machilipatnam", "visakhapatnam")
 
 
+def build_view_memory_html(map_var: str) -> str:
+    """8 Nov 2026 (Srikanth): keep the reader's pan/zoom across a refresh (the page reloads itself every 5 min).
+    sessionStorage = per browser tab: reloads and the auto-refresh return to the last view, a fresh visit or a new
+    tab opens on the default overview. Storage can be blocked (private windows, some embeds) -- every access is
+    guarded, and the page then simply opens on the default view."""
+    return f"""
+<script>
+document.addEventListener("DOMContentLoaded", function() {{
+  setTimeout(function() {{
+    var map = window["{map_var}"]; if (!map) return;
+    var KEY = "comk_map_view";
+    try {{
+      var v = JSON.parse(sessionStorage.getItem(KEY) || "null");
+      if (v && isFinite(v.lat) && isFinite(v.lng) && isFinite(v.z)) map.setView([v.lat, v.lng], v.z, {{animate: false}});
+    }} catch (err) {{}}
+    map.on("moveend zoomend", function() {{
+      try {{
+        var c = map.getCenter();
+        sessionStorage.setItem(KEY, JSON.stringify({{lat: c.lat, lng: c.lng, z: map.getZoom()}}));
+      }} catch (err) {{}}
+    }});
+  }}, 250);
+}});
+</script>
+"""
+
+
 def build_radar_chooser_html(map_var: str, groups: dict) -> str:
     """Switching for the radar chooser in the info banner (build_info_banner_html): shows the chosen group, hides
     the others, marks the chosen line(s), and remembers the choice across the page's timed reload. Browser storage
@@ -3512,6 +3539,7 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
         build_cell_zoom_declutter_script(m.get_name(), cell_marker_registry)))
     if use_chooser:
         m.get_root().html.add_child(folium.Element(build_radar_chooser_html(m.get_name(), chooser_groups)))
+    m.get_root().html.add_child(folium.Element(build_view_memory_html(m.get_name())))
 
     if out_html:
         m.save(out_html)
