@@ -36,3 +36,13 @@ jobs:
           curl -sS --ssl-reqd --max-time 60 -u "$U:$P" "ftp://$H/${D#/}" | grep -E "storm_forecast|nowcast_bot|radar_loop|\.ftp-deploy" || true
           echo "-- quota (if the server reports it):"
           curl -sS --ssl-reqd --max-time 30 -u "$U:$P" "ftp://$H/" -Q "SITE QUOTA" 2>&1 | tail -3 || true
+      - name: Largest files and folders in the upload folder
+        env:
+          H: ${{ secrets.FTP_HOST }}
+          U: ${{ secrets.FTP_USERNAME }}
+          P: ${{ secrets.FTP_PASSWORD }}
+          D: ${{ secrets.FTP_REMOTE_DIR }}
+        run: |
+          sudo apt-get -qq install -y lftp >/dev/null 2>&1 || true
+          d="${D#./}"; d="${d%/}"
+          lftp -e "set ftp:ssl-force true; set ssl:verify-certificate no; set net:timeout 60; set net:max-retries 2; cd /$d; du -m --max-depth=1 . | sort -rn | head -25; echo ---; cls -l --sort=size | head -20; bye" -u "$U,$P" "$H" 2>&1 | tail -50 || true
