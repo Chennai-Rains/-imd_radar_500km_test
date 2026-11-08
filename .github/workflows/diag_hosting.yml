@@ -46,3 +46,11 @@ jobs:
           sudo apt-get -qq install -y lftp >/dev/null 2>&1 || true
           d="${D#./}"; d="${d%/}"
           lftp -e "set ftp:ssl-force true; set ssl:verify-certificate no; set net:timeout 60; set net:max-retries 2; cd /$d; du -m --max-depth=1 . | sort -rn | head -25; echo ---; cls -l --sort=size | head -20; bye" -u "$U,$P" "$H" 2>&1 | tail -50 || true
+      - name: Whole account, top two levels (MB)
+        timeout-minutes: 25
+        env:
+          H: ${{ secrets.FTP_HOST }}
+          U: ${{ secrets.FTP_USERNAME }}
+          P: ${{ secrets.FTP_PASSWORD }}
+        run: |
+          lftp -e "set ftp:ssl-force true; set ssl:verify-certificate no; set net:timeout 60; set net:max-retries 2; cd /; pwd; cls -la; echo ---; du -m --max-depth=2 / | sort -rn | head -40; bye" -u "$U,$P" "$H" 2>&1 | tail -80 || true
