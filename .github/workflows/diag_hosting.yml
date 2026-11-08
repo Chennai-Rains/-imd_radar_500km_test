@@ -25,7 +25,7 @@ jobs:
         run: |
           curl -sS -o live.html --max-time 60 "https://plots.chennairains.com/storm_forecast_map.html?nc=$RANDOM"
           echo "bytes: $(wc -c < live.html)"; echo "ends with </html>: $(tail -c 20 live.html | grep -c '</html>')"
-          echo "map init present: $(grep -c 'L.map(' live.html)"; echo "-- last 300 chars:"; tail -c 300 live.html; echo
+          echo "map init present: $(grep -c 'L.map(' live.html)"; echo "view memory present: $(grep -c comk_map_view live.html)"; grep -o "Updated [^<]*" live.html | head -1; echo "-- last 300 chars:"; tail -c 300 live.html; echo
       - name: Remote file sizes
         env:
           H: ${{ secrets.FTP_HOST }}
