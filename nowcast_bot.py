@@ -185,6 +185,7 @@ PRODUCT_RADAR = {
     "mlr_maxz": "mangalore",
     "tvm_maxz": "trivandrum", "tvm_ppi": "trivandrum",
     "vsk_maxz": "visakhapatnam", "vsk_ppi": "visakhapatnam", "mpt_maxz": "machilipatnam",
+    "kkl_sri": "karaikal",
 }
 
 EFFECTIVE_EARTH_RADIUS_KM = 8494.0  # standard 4/3-Earth-radius model
@@ -308,6 +309,32 @@ PRODUCTS = {
         "elevation_bbox": (715, 188, 880, 206),
         "plot_bbox": (0, 0, 720, 720),
         "cell_dbz_threshold": 30,
+        "label_exclude_boxes": [
+            (167, 40, 193, 57), (527, 40, 553, 57), (347, 112, 373, 129),
+            (139, 231, 165, 248), (555, 231, 581, 248), (139, 471, 165, 488),
+            (555, 471, 581, 488), (347, 591, 373, 608), (167, 663, 193, 680),
+            (527, 663, 553, 680),
+        ],
+    },
+    # 11 Nov 2026 (Srikanth): Karaikal's Surface Rainfall Intensity (SRI) product -- rain RATE near the ground (mm/h),
+    # same 880x720 frame and geometry as kkl_ppi. Never drawn on the map and never used to find rain: it only judges
+    # how hard the rain is (see BOT_SRI_* and _bot_sri_cap). The colour bar is a continuous gradient with 15 labelled
+    # bins; the 16 bin edges (top to bottom) sit at even pixel spacing, so colorbar_breakpoints maps it exactly.
+    # Echo is drawn out to the image corners (~200 km), not just the 150 km printed in the panel.
+    "kkl_sri": {
+        "url": "https://mausam.imd.gov.in/Radar/sri_kkl.gif",
+        "role": "intensity_only",
+        "range_km": 210.0,         # whole square image (printed max range 150 km, but echo is drawn to the corners)
+        "elevation_deg": None,
+        "image_size": (880, 720),
+        "site_px": (359.4, 359.3),
+        "km_per_px": 2.398,
+        "colorbar_bbox": (780, 375, 800, 616),
+        "colorbar_breakpoints": [100, 93, 87, 80, 74, 67, 60, 54, 47, 41, 34, 27, 21, 14, 7.6, 1.0],
+        "timestamp_bbox": (715, 218, 880, 262),
+        "elevation_bbox": None,
+        "plot_bbox": (0, 0, 718, 720),
+        "cell_dbz_threshold": 999,
         "label_exclude_boxes": [
             (167, 40, 193, 57), (527, 40, 553, 57), (347, 112, 373, 129),
             (139, 231, 165, 248), (555, 231, 581, 248), (139, 471, 165, 488),
@@ -4324,6 +4351,122 @@ def _bot_speed_bearing(u: float, v: float) -> tuple[float, float]:
     return round(float(np.hypot(u, v)), 1), round(float(np.degrees(np.arctan2(u, v)) % 360), 0)
 
 
+# ---- surface rain rate (SRI) as the judge of intensity ----
+# 11 Nov 2026: 8:21 AM IST alert "Heavy" for Salem / Kallakurichi near Attur came from Karaikal MAXZ alone (46-54 dBZ,
+# 1-9 nodes >= 45, ~150 km out). Karaikal's own Surface Rainfall product showed the same showers at 1-14 mm/h and the
+# TNSDMA gauges recorded nothing (<= 0.4 mm in 24 h). MAXZ takes the strongest echo anywhere in the column, so at long
+# range it overstates what reaches the ground. Wherever a fresh SRI frame looks, an echo may only stay at Heavy
+# strength (>= BOT_SRI_CAP_DBZ + 1) if SRI shows >= BOT_SRI_HEAVY_MMH within the neighbourhood; otherwise it is held
+# just below Heavy. The rain itself is kept (it still counts as Moderate) -- SRI never removes or adds echo.
+BOT_SRI_PRODUCTS: tuple = ("kkl_sri",)
+BOT_SRI_HEAVY_MMH: float = 21.0     # SRI bin 21-27 mm/h or above (Z = 200 R^1.6: 45 dBZ ~ 24 mm/h)
+BOT_SRI_CAP_DBZ: float = 44.0       # just below social_alerts.HEAVY_DBZ
+BOT_SRI_CHECK_KM: float = 6.0
+BOT_SRI_MOTION_KM_PER_MIN: float = 0.5
+BOT_SRI_MAX_AGE_MIN: float = 30.0
+BOT_SRI_KEEP_FRAMES: int = 36       # archived for calibration (~6 h)
+
+
+def _decode_sri(img: Image.Image, product: str) -> np.ndarray:
+    """Rain rate (mm/h) over the product's plot_bbox; NaN where there is no rain colour."""
+    cfg = PRODUCTS[product]
+    l, t, r, b = cfg["colorbar_bbox"]
+    rgb = np.array(img.convert("RGB"), dtype=float)
+    bar = rgb[t:b, (l + r) // 2]
+    bp = cfg["colorbar_breakpoints"]
+    vals = np.interp(np.arange(len(bar)), np.linspace(0, len(bar) - 1, len(bp)), bp)
+    # a colour repeated down the bar (the flat bottom bin) takes its lowest value
+    keyed = {}
+    for c, v in zip(map(tuple, bar.astype(int)), vals):
+        keyed[c] = min(v, keyed.get(c, v))
+    colors = np.array(list(keyed.keys()), dtype=float)
+    rates = np.array(list(keyed.values()))
+    pl, pt, pr, pb = cfg["plot_bbox"]
+    plot = rgb[pt:pb, pl:pr]
+    dist, idx = cKDTree(colors).query(plot.reshape(-1, 3), k=1)
+    out = np.where(dist <= DIST_THRESHOLD, rates[idx], np.nan).reshape(plot.shape[:2])
+    for (bl, bt, br, bb) in cfg.get("label_exclude_boxes", []):
+        out[max(bt - pt, 0):max(bb - pt, 0), max(bl - pl, 0):max(br - pl, 0)] = np.nan
+    return out
+
+
+def _bot_sri_grid(product: str, lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime):
+    """(rate grid on the bot grid: mm/h, 0 = seen and dry, NaN = not seen; age in minutes) or None."""
+    cfg = PRODUCTS[product]
+    raw = fetch_frame(cfg["url"])
+    if raw is None:
+        print(f"[bot-export] {product}: fetch failed")
+        return None
+    try:
+        img = Image.open(io.BytesIO(raw)); img.load()
+    except (UnidentifiedImageError, OSError) as e:
+        print(f"[bot-export] {product}: not an image ({e})")
+        return None
+    obs = extract_observation_time(img, product)
+    if obs is None:
+        print(f"[bot-export] {product}: frame time unreadable -- not used")
+        return None
+    age = (now_utc - obs).total_seconds() / 60.0
+    try:
+        tag = obs.strftime("%Y%m%dT%H%M%SZ")
+        f = ARCHIVE_DIR / f"{product}_{tag}.gif"
+        if not f.exists():
+            f.write_bytes(raw)
+        for old in sorted(ARCHIVE_DIR.glob(f"{product}_*.gif"))[:-BOT_SRI_KEEP_FRAMES]:
+            old.unlink()
+    except Exception as e:
+        print(f"[bot-export] {product}: archive skipped ({e!r})")
+    if age > BOT_SRI_MAX_AGE_MIN:
+        print(f"[bot-export] {product}: frame {age:.0f} min old -- not used")
+        return None
+    rate = _decode_sri(img, product)
+    # node = strongest pixel within about one grid cell (same footprint as _bot_regrid_dbz)
+    half_cell_px = BOT_GRID_STEP_DEG * 111.0 * cfg["km_per_px"] / 2.0
+    k = 2 * int(np.floor(half_cell_px + 0.5)) + 1
+    src = ndimage.maximum_filter(np.nan_to_num(rate, nan=0.0), size=k) if k > 1 else np.nan_to_num(rate, nan=0.0)
+    x, y, cover = _bot_pixel_index(product, lat2d, lon2d, rate.shape)
+    out = np.full(lat2d.shape, np.nan)
+    out[cover] = src[y[cover], x[cover]]
+    return out, age, obs
+
+
+def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) -> dict:
+    """Hold echo below Heavy where a fresh SRI frame shows no heavy rate nearby. Returns a summary for the JSON."""
+    step = BOT_GRID_STEP_DEG
+    summary = {}
+    for sp in BOT_SRI_PRODUCTS:
+        try:
+            got = _bot_sri_grid(sp, lat2d, lon2d, now_utc)
+        except Exception as e:
+            print(f"[bot-export] {sp}: skipped ({e!r})")
+            got = None
+        if got is None:
+            summary[sp] = {"used": False}
+            continue
+        rate, sri_age, obs = got
+        seen = np.isfinite(rate)
+        held_total, before_total = 0, 0
+        for p, g in list(regridded.items()):
+            p_age = age_h.get(p, 0.0) * 60.0
+            radius_km = BOT_SRI_CHECK_KM + BOT_SRI_MOTION_KM_PER_MIN * abs(sri_age - p_age)
+            rad = max(1, int(round(radius_km / (step * 111.0))))
+            near = ndimage.maximum_filter(np.where(seen, rate, 0.0), size=2 * rad + 1)
+            # only where SRI looks at the whole neighbourhood (no judging from the edge of its picture)
+            looks = ndimage.minimum_filter(seen.astype(np.uint8), size=2 * rad + 1).astype(bool)
+            hold = looks & np.isfinite(g) & (g > BOT_SRI_CAP_DBZ) & (near < BOT_SRI_HEAVY_MMH)
+            if hold.any():
+                before_total += int((np.isfinite(g) & (g > BOT_SRI_CAP_DBZ)).sum())
+                held_total += int(hold.sum())
+                regridded[p] = np.where(hold, BOT_SRI_CAP_DBZ, g)
+                print(f"[bot-export] {p}: {int(hold.sum())} nodes held below Heavy by {sp} "
+                      f"({sri_age:.0f} min old; no >= {BOT_SRI_HEAVY_MMH:.0f} mm/h within {radius_km:.0f} km)")
+        summary[sp] = {"used": True, "obs_time_utc": obs.isoformat(timespec="seconds"), "age_min": round(sri_age, 0),
+                       "max_rate_mmh": round(float(np.nanmax(rate)), 1) if seen.any() else None,
+                       "nodes_heavy_rate": int((rate >= BOT_SRI_HEAVY_MMH).sum()),
+                       "nodes_held_below_heavy": held_total}
+    return summary
+
+
 def export_bot_data(products: tuple | None = None, now_utc: datetime | None = None) -> dict | None:
     """Write OUTPUT_BOT_JSON + OUTPUT_BOT_GRID for this cycle (see the block
     comment above). Returns the JSON content, or None if there was nothing
@@ -4482,6 +4625,8 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
                 regridded[p] = np.where(drop, np.nan, vals)
                 print(f"[bot-export] {p}: {weak_ids.size}/{n} far patches without a "
                       f"{BOT_LONG_RANGE_MIN_CORE_DBZ:.0f} dBZ core dropped ({int(drop.sum())} nodes)")
+
+    sri_summary = _bot_sri_cap(regridded, age_h, lat2d, lon2d, now_utc) if regridded else {}
 
     if not regridded:
         print("[bot-export] no usable radar this cycle -- writing an index that says so, no grid")
@@ -4657,6 +4802,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
         "generated_ist": now_utc.astimezone(_IST).strftime("%d %b %Y %H:%M IST"),
         "stale_after_min": STALE_OBS_MINUTES,
         "radars": radars,
+        "surface_rain_check": sri_summary,
         "grid": grid_meta,
         "motion": {
             "available": motion_ok,
