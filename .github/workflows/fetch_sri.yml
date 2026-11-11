@@ -1,18 +1,14 @@
 name: fetch_sri (one-off)
 on: workflow_dispatch
+permissions: {contents: write}
 jobs:
   get:
     runs-on: ubuntu-latest
     steps:
       - run: |
-          mkdir sri
+          mkdir sri && cd sri
           for r in kkl cni plk tvm mlr vsk mpt koc; do
-            for k in 0 1 2; do
-              curl -s -m 40 -A "Mozilla/5.0" -o sri/sri_${r}_$k.gif -w "$r $k %{http_code} %{size_download}\n" https://mausam.imd.gov.in/Radar/sri_$r.gif || true
-              [ "$r" = kkl ] || break
-              sleep 300
-            done
+            curl -s -m 40 -A "Mozilla/5.0" -o sri_$r.gif -w "$r %{http_code} %{size_download}\n" https://mausam.imd.gov.in/Radar/sri_$r.gif || true
           done
-          ls -la sri
-      - uses: actions/upload-artifact@v4
-        with: {name: sri, path: sri}
+          git init -q -b sri-samples && git add . && git -c user.name=bot -c user.email=bot@x commit -qm "SRI samples $(date -u +%FT%TZ)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" sri-samples
