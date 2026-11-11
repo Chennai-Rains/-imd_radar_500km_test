@@ -54,8 +54,30 @@ jobs:
         with:
           python-version: "3.11"
 
+      # 12 Nov 2026: on 11 Nov, 7:55-10:10 PM IST, every run failed here -- the runners could not resolve the Ubuntu
+      # package mirror ("Temporary failure resolving azure.archive.ubuntu.com"), apt hung ~8 min, and the run died
+      # before making a map. The .deb files are now kept in the Actions cache and installed straight from it, so a
+      # mirror outage no longer matters; apt (with short timeouts) is only the fallback when the cache is empty/stale.
+      - name: Restore cached Tesseract packages
+        id: tess_cache
+        uses: actions/cache@v4
+        with:
+          path: ~/tess-debs
+          key: tesseract-debs-${{ runner.os }}-${{ runner.arch }}-v1
+
       - name: Install Tesseract OCR (system package -- pytesseract just wraps this binary)
-        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+        timeout-minutes: 5
+        run: |
+          if ls ~/tess-debs/*.deb >/dev/null 2>&1 && sudo dpkg -i ~/tess-debs/*.deb >/dev/null && tesseract --version >/dev/null 2>&1; then
+            echo "Tesseract installed from the cached packages"; exit 0
+          fi
+          echo "No usable cached packages -- installing from the Ubuntu mirror"
+          APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+          sudo apt-get $APT update -qq || true
+          sudo rm -f /var/cache/apt/archives/*.deb
+          sudo apt-get $APT install -y tesseract-ocr
+          rm -rf ~/tess-debs && mkdir -p ~/tess-debs && cp /var/cache/apt/archives/*.deb ~/tess-debs/
+          ls ~/tess-debs
 
       - name: Install Python dependencies
         run: pip install -r requirements.txt
@@ -127,7 +149,7 @@ jobs:
         # 6 Nov 2026 (Srikanth): one pipeline instead of two, to cut the uploads to a struggling host. This repo
         # now also writes the LIVE storm_forecast_map.html (all its radars and the radar menu); the production repo
         # (Chennai-Rains/IMD_Radar_Updates) is switched off and kept as a fallback.
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && hashFiles('output/**') != '' }}   # nothing to upload if the pipeline never ran
         run: |
           # 6 Nov 2026: uploads take minutes on the slow host and FTP overwrites the live file IN PLACE, so a visitor
           # (and Cloudflare's cache) could get a half-written page -- banner and legend but no map. The page now goes
@@ -154,7 +176,7 @@ jobs:
         # what happened the one time this wasn't set.
         id: upload1
         continue-on-error: true
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && hashFiles('output/**') != '' }}   # nothing to upload if the pipeline never ran
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
           server: ${{ secrets.FTP_HOST }}
