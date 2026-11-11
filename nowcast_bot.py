@@ -185,7 +185,7 @@ PRODUCT_RADAR = {
     "mlr_maxz": "mangalore",
     "tvm_maxz": "trivandrum", "tvm_ppi": "trivandrum",
     "vsk_maxz": "visakhapatnam", "vsk_ppi": "visakhapatnam", "mpt_maxz": "machilipatnam",
-    "kkl_sri": "karaikal",
+    "kkl_sri": "karaikal", "cni_sri": "chennai",
 }
 
 EFFECTIVE_EARTH_RADIUS_KM = 8494.0  # standard 4/3-Earth-radius model
@@ -341,6 +341,27 @@ PRODUCTS = {
             (555, 471, 581, 488), (347, 591, 373, 608), (167, 663, 193, 680),
             (527, 663, 553, 680),
         ],
+    },
+    # 11 Nov 2026: Chennai DWR's SRI (sri_cni.gif), 120 km, "Resolution: 0.400 km/pixel" = 2.5 px/km; ring centre
+    # measured from the 20-km rings (x 349/399/449/499 on row 292). Selex Rainbow web palette: each colour-bar band is a
+    # DITHER of two or three colours, and some colours appear in two neighbouring bands, so pixels are judged on their
+    # 3x3 average colour (see _decode_sri). The sea background shares the 0.8-1.6 mm/h colours -- harmless, the check
+    # only looks at rates >= 6.3 mm/h. Rows of each band on the colour bar (x 650), top to bottom, with its lower edge.
+    "cni_sri": {
+        "url": "https://mausam.imd.gov.in/Radar/sri_cni.gif",
+        "role": "intensity_only",
+        "range_km": 120.0,
+        "elevation_deg": None,
+        "image_size": (819, 600),
+        "site_px": (299.0, 292.0),
+        "km_per_px": 2.5,
+        "colorbar_bbox": (640, 74, 660, 275),
+        "sri_bands": [(74, 91, 100.0), (93, 110, 50.1), (111, 128, 25.1), (129, 146, 12.6), (147, 165, 6.3)],
+        "sri_band_x": (615, 685),
+        "timestamp_bbox": (600, 28, 819, 50),
+        "elevation_bbox": None,
+        "plot_bbox": (0, 0, 600, 600),
+        "cell_dbz_threshold": 999,
     },
     "kkl_ppz": {
         "radial_spoke_filter": True,   # interference spokes, see radial_spoke_mask
@@ -4358,8 +4379,14 @@ def _bot_speed_bearing(u: float, v: float) -> tuple[float, float]:
 # range it overstates what reaches the ground. Wherever a fresh SRI frame looks, an echo may only stay at Heavy
 # strength (>= BOT_SRI_CAP_DBZ + 1) if SRI shows >= BOT_SRI_HEAVY_MMH within the neighbourhood; otherwise it is held
 # just below Heavy. The rain itself is kept (it still counts as Moderate) -- SRI never removes or adds echo.
-BOT_SRI_PRODUCTS: tuple = ("kkl_sri",)
+BOT_SRI_PRODUCTS: tuple = ("kkl_sri", "cni_sri")
 BOT_SRI_HEAVY_MMH: float = 21.0     # SRI bin 21-27 mm/h or above (Z = 200 R^1.6: 45 dBZ ~ 24 mm/h)
+# Chennai's bands double (6.3 / 12.6 / 25.1 / 50.1): 21 mm/h falls inside 12.6-25.1, so that band counts as heavy.
+BOT_SRI_HEAVY_MMH_BY_PRODUCT: dict = {"cni_sri": 12.6}
+# 11 Nov 2026 (Srikanth): Chennai SRI is RECORDED only until it has been seen to read sensibly in storms within 120 km
+# (it is built from the same low scans as the Chennai PPI, which has read low since the late-Oct maintenance).
+BOT_SRI_RECORD_ONLY: tuple = ("cni_sri",)
+BOT_SRI_LOG = Path("state_social_test/sri_compare.jsonl")   # one line per SRI product per cycle, for calibration
 BOT_SRI_CAP_DBZ: float = 44.0       # just below social_alerts.HEAVY_DBZ
 BOT_SRI_CHECK_KM: float = 6.0
 BOT_SRI_MOTION_KM_PER_MIN: float = 0.5
@@ -4370,8 +4397,25 @@ BOT_SRI_KEEP_FRAMES: int = 36       # archived for calibration (~6 h)
 def _decode_sri(img: Image.Image, product: str) -> np.ndarray:
     """Rain rate (mm/h) over the product's plot_bbox; NaN where there is no rain colour."""
     cfg = PRODUCTS[product]
-    l, t, r, b = cfg["colorbar_bbox"]
     rgb = np.array(img.convert("RGB"), dtype=float)
+    if "sri_bands" in cfg:
+        # dithered bands: compare each pixel's 3x3 average colour with each band's average colour
+        x0, x1 = cfg["sri_band_x"]
+        band_cols = np.array([rgb[y0:y1 + 1, x0:x1].reshape(-1, 3).mean(0) for y0, y1, _ in cfg["sri_bands"]])
+        band_vals = np.array([v for _, _, v in cfg["sri_bands"]])
+        used = {tuple(c) for y0, y1, _ in cfg["sri_bands"] for c in rgb[y0:y1 + 1, x0:x1].reshape(-1, 3).astype(int)}
+        pl, pt, pr, pb = cfg["plot_bbox"]
+        plot = rgb[pt:pb, pl:pr]
+        packed = (plot[..., 0].astype(np.int64) << 16) | (plot[..., 1].astype(np.int64) << 8) | plot[..., 2].astype(np.int64)
+        member = np.isin(packed, [(r_ << 16) | (g_ << 8) | b_ for r_, g_, b_ in used])
+        member = ndimage.binary_opening(member, structure=np.ones((2, 2)))   # lone pixels of a shared colour are map detail
+        cnt = ndimage.uniform_filter(member.astype(float), size=3)
+        avg = np.stack([ndimage.uniform_filter(np.where(member, plot[..., k], 0.0), size=3) for k in range(3)], -1)
+        avg = avg / np.maximum(cnt, 1e-9)[..., None]
+        d = np.linalg.norm(avg[..., None, :] - band_cols[None, None], axis=-1)
+        out = np.where(member, band_vals[d.argmin(-1)], np.nan)
+        return out
+    l, t, r, b = cfg["colorbar_bbox"]
     bar = rgb[t:b, (l + r) // 2]
     bp = cfg["colorbar_breakpoints"]
     vals = np.interp(np.arange(len(bar)), np.linspace(0, len(bar) - 1, len(bp)), bp)
@@ -4445,7 +4489,10 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
             continue
         rate, sri_age, obs = got
         seen = np.isfinite(rate)
+        thr = BOT_SRI_HEAVY_MMH_BY_PRODUCT.get(sp, BOT_SRI_HEAVY_MMH)
+        record_only = sp in BOT_SRI_RECORD_ONLY
         held_total, before_total = 0, 0
+        per_product = {}
         for p, g in list(regridded.items()):
             p_age = age_h.get(p, 0.0) * 60.0
             radius_km = BOT_SRI_CHECK_KM + BOT_SRI_MOTION_KM_PER_MIN * abs(sri_age - p_age)
@@ -4453,17 +4500,35 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
             near = ndimage.maximum_filter(np.where(seen, rate, 0.0), size=2 * rad + 1)
             # only where SRI looks at the whole neighbourhood (no judging from the edge of its picture)
             looks = ndimage.minimum_filter(seen.astype(np.uint8), size=2 * rad + 1).astype(bool)
-            hold = looks & np.isfinite(g) & (g > BOT_SRI_CAP_DBZ) & (near < BOT_SRI_HEAVY_MMH)
+            strong = looks & np.isfinite(g) & (g > BOT_SRI_CAP_DBZ)
+            hold = strong & (near < thr)
+            in_view = looks & np.isfinite(g) & (g > 0)
+            if in_view.any():
+                per_product[p] = {"max_dbz": round(float(g[in_view].max()), 1), "nodes_35": int((g[in_view] >= 35).sum()),
+                                  "nodes_heavy": int(strong.sum()), "would_hold": int(hold.sum()),
+                                  "sri_max_near_heavy": round(float(near[strong].max()), 1) if strong.any() else None}
             if hold.any():
-                before_total += int((np.isfinite(g) & (g > BOT_SRI_CAP_DBZ)).sum())
+                before_total += int(strong.sum())
                 held_total += int(hold.sum())
-                regridded[p] = np.where(hold, BOT_SRI_CAP_DBZ, g)
-                print(f"[bot-export] {p}: {int(hold.sum())} nodes held below Heavy by {sp} "
-                      f"({sri_age:.0f} min old; no >= {BOT_SRI_HEAVY_MMH:.0f} mm/h within {radius_km:.0f} km)")
-        summary[sp] = {"used": True, "obs_time_utc": obs.isoformat(timespec="seconds"), "age_min": round(sri_age, 0),
+                if not record_only:
+                    regridded[p] = np.where(hold, BOT_SRI_CAP_DBZ, g)
+                print(f"[bot-export] {p}: {int(hold.sum())} nodes {'WOULD BE ' if record_only else ''}held below Heavy "
+                      f"by {sp} ({sri_age:.0f} min old; no >= {thr:g} mm/h within {radius_km:.0f} km)")
+        summary[sp] = {"used": not record_only, "record_only": record_only,
+                       "obs_time_utc": obs.isoformat(timespec="seconds"), "age_min": round(sri_age, 0),
                        "max_rate_mmh": round(float(np.nanmax(rate)), 1) if seen.any() else None,
-                       "nodes_heavy_rate": int((rate >= BOT_SRI_HEAVY_MMH).sum()),
-                       "nodes_held_below_heavy": held_total}
+                       "heavy_rate_mmh": thr, "nodes_heavy_rate": int((rate >= thr).sum()),
+                       "nodes_held_below_heavy": 0 if record_only else held_total,
+                       "nodes_would_hold": held_total, "radar_products": per_product}
+        try:
+            BOT_SRI_LOG.parent.mkdir(parents=True, exist_ok=True)
+            if BOT_SRI_LOG.exists() and BOT_SRI_LOG.stat().st_size > 4_000_000:   # keep roughly the last few weeks
+                lines = BOT_SRI_LOG.read_text().splitlines(keepends=True)
+                BOT_SRI_LOG.write_text("".join(lines[len(lines) // 2:]))
+            with open(BOT_SRI_LOG, "a") as fh:
+                fh.write(json.dumps({"t": now_utc.isoformat(timespec="seconds"), "sri": sp, **summary[sp]}) + "\n")
+        except Exception as e:
+            print(f"[bot-export] {sp}: log skipped ({e!r})")
     return summary
 
 
