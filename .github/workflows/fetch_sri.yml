@@ -6,7 +6,7 @@ jobs:
     steps:
       - run: |
           mkdir sri
-          for r in kkl cni chn tvm mlr vsk mpt koc goa hyd sri mum; do
+          for r in kkl cni plk tvm mlr vsk mpt koc; do
             for k in 0 1 2; do
               curl -s -m 40 -A "Mozilla/5.0" -o sri/sri_${r}_$k.gif -w "$r $k %{http_code} %{size_download}\n" https://mausam.imd.gov.in/Radar/sri_$r.gif || true
               [ "$r" = kkl ] || break
