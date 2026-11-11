@@ -4386,7 +4386,19 @@ BOT_SRI_HEAVY_MMH_BY_PRODUCT: dict = {"cni_sri": 12.6}
 # 11 Nov 2026 (Srikanth): Chennai SRI is RECORDED only until it has been seen to read sensibly in storms within 120 km
 # (it is built from the same low scans as the Chennai PPI, which has read low since the late-Oct maintenance).
 BOT_SRI_RECORD_ONLY: tuple = ("cni_sri",)
-BOT_SRI_LOG = Path("state_social_test/sri_compare.jsonl")   # one line per SRI product per cycle, for calibration
+BOT_SRI_LOG = Path("state_social_test/sri_compare.jsonl")
+# 12 Nov 2026 (Srikanth: "another early morning alert when there's no rain"): night-time echoes over the western hills
+# (Kolli, Pachamalai, Kalvarayan, Sirumalai) seen only by Karaikal MAXZ at 150-200 km, where its lowest beam is already
+# 3+ km up and catches rain aloft that never reaches the ground. Two more checks:
+#  1. Where SRI looks and shows less than BOT_SRI_RAIN_MMH anywhere near an echo, it is held below alert strength
+#     (BOT_SRI_NO_RAIN_DBZ) -- the radar's own surface estimate says it is not raining there worth an alert.
+#  2. Beyond BOT_SINGLE_RADAR_FAR_KM from its radar, where no SRI looks, an echo may only be Heavy if a DIFFERENT radar
+#     also shows >= 45 dBZ within BOT_SINGLE_RADAR_CONFIRM_KM.
+BOT_SRI_RAIN_MMH: float = 7.6        # Karaikal SRI: anything in the lowest bin (1-7.6 mm/h) is not alert-worthy rain
+BOT_SRI_RAIN_MMH_BY_PRODUCT: dict = {"cni_sri": 6.3}
+BOT_SRI_NO_RAIN_DBZ: float = 34.0    # just below social_alerts.ALERT_DBZ (35)
+BOT_SINGLE_RADAR_FAR_KM: float = 150.0
+BOT_SINGLE_RADAR_CONFIRM_KM: float = 10.0   # one line per SRI product per cycle, for calibration
 BOT_SRI_CAP_DBZ: float = 44.0       # just below social_alerts.HEAVY_DBZ
 BOT_SRI_CHECK_KM: float = 6.0
 BOT_SRI_MOTION_KM_PER_MIN: float = 0.5
@@ -4478,6 +4490,7 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
     """Hold echo below Heavy where a fresh SRI frame shows no heavy rate nearby. Returns a summary for the JSON."""
     step = BOT_GRID_STEP_DEG
     summary = {}
+    judged = np.zeros(lat2d.shape, dtype=bool)
     for sp in BOT_SRI_PRODUCTS:
         try:
             got = _bot_sri_grid(sp, lat2d, lon2d, now_utc)
@@ -4491,7 +4504,7 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
         seen = np.isfinite(rate)
         thr = BOT_SRI_HEAVY_MMH_BY_PRODUCT.get(sp, BOT_SRI_HEAVY_MMH)
         record_only = sp in BOT_SRI_RECORD_ONLY
-        held_total, before_total = 0, 0
+        held_total, before_total, dropped_total = 0, 0, 0
         per_product = {}
         for p, g in list(regridded.items()):
             p_age = age_h.get(p, 0.0) * 60.0
@@ -4502,16 +4515,28 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
             looks = ndimage.minimum_filter(seen.astype(np.uint8), size=2 * rad + 1).astype(bool)
             strong = looks & np.isfinite(g) & (g > BOT_SRI_CAP_DBZ)
             hold = strong & (near < thr)
+            rain_thr = BOT_SRI_RAIN_MMH_BY_PRODUCT.get(sp, BOT_SRI_RAIN_MMH)
+            no_rain = looks & np.isfinite(g) & (g > BOT_SRI_NO_RAIN_DBZ) & (near < rain_thr)
             in_view = looks & np.isfinite(g) & (g > 0)
             if in_view.any():
                 per_product[p] = {"max_dbz": round(float(g[in_view].max()), 1), "nodes_35": int((g[in_view] >= 35).sum()),
                                   "nodes_heavy": int(strong.sum()), "would_hold": int(hold.sum()),
+                                  "would_drop_no_rain": int(no_rain.sum()),
                                   "sri_max_near_heavy": round(float(near[strong].max()), 1) if strong.any() else None}
+            if not record_only:
+                judged |= looks
+            if no_rain.any():
+                dropped_total += int(no_rain.sum())
+                if not record_only:
+                    g = np.where(no_rain, BOT_SRI_NO_RAIN_DBZ, g)
+                    regridded[p] = g
+                print(f"[bot-export] {p}: {int(no_rain.sum())} nodes {'WOULD BE ' if record_only else ''}held below "
+                      f"alert strength by {sp} (< {rain_thr:g} mm/h within {radius_km:.0f} km)")
             if hold.any():
                 before_total += int(strong.sum())
                 held_total += int(hold.sum())
                 if not record_only:
-                    regridded[p] = np.where(hold, BOT_SRI_CAP_DBZ, g)
+                    regridded[p] = np.where(hold & ~no_rain, BOT_SRI_CAP_DBZ, g)
                 print(f"[bot-export] {p}: {int(hold.sum())} nodes {'WOULD BE ' if record_only else ''}held below Heavy "
                       f"by {sp} ({sri_age:.0f} min old; no >= {thr:g} mm/h within {radius_km:.0f} km)")
         summary[sp] = {"used": not record_only, "record_only": record_only,
@@ -4519,7 +4544,8 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
                        "max_rate_mmh": round(float(np.nanmax(rate)), 1) if seen.any() else None,
                        "heavy_rate_mmh": thr, "nodes_heavy_rate": int((rate >= thr).sum()),
                        "nodes_held_below_heavy": 0 if record_only else held_total,
-                       "nodes_would_hold": held_total, "radar_products": per_product}
+                       "nodes_would_hold": held_total,
+                       "nodes_no_rain": dropped_total, "radar_products": per_product}
         try:
             BOT_SRI_LOG.parent.mkdir(parents=True, exist_ok=True)
             if BOT_SRI_LOG.exists() and BOT_SRI_LOG.stat().st_size > 4_000_000:   # keep roughly the last few weeks
@@ -4529,6 +4555,32 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
                 fh.write(json.dumps({"t": now_utc.isoformat(timespec="seconds"), "sri": sp, **summary[sp]}) + "\n")
         except Exception as e:
             print(f"[bot-export] {sp}: log skipped ({e!r})")
+
+    # single far radar: Heavy needs a second radar where no SRI judges
+    step_km = step * 111.0
+    rad = max(1, int(round(BOT_SINGLE_RADAR_CONFIRM_KM / step_km)))
+    far_held = {}
+    for p, g in list(regridded.items()):
+        site = RADAR_SITES.get(PRODUCT_RADAR.get(p, ""), {})
+        if "site_lat" not in site:
+            continue
+        dist = np.hypot((lat2d - site["site_lat"]) * 111.0,
+                        (lon2d - site["site_lon"]) * 111.0 * np.cos(np.radians(site["site_lat"])))
+        cand = np.isfinite(g) & (g > BOT_SRI_CAP_DBZ) & (dist > BOT_SINGLE_RADAR_FAR_KM) & ~judged
+        if not cand.any():
+            continue
+        other = np.zeros(lat2d.shape, dtype=bool)
+        for q, h in regridded.items():
+            if PRODUCT_RADAR.get(q) != PRODUCT_RADAR.get(p):
+                other |= np.isfinite(h) & (h >= BOT_SRI_CAP_DBZ + 1.0)
+        confirmed = ndimage.maximum_filter(other.astype(np.uint8), size=2 * rad + 1).astype(bool)
+        hold = cand & ~confirmed
+        if hold.any():
+            regridded[p] = np.where(hold, BOT_SRI_CAP_DBZ, g)
+            far_held[p] = int(hold.sum())
+            print(f"[bot-export] {p}: {int(hold.sum())} nodes beyond {BOT_SINGLE_RADAR_FAR_KM:.0f} km held below Heavy "
+                  f"(one radar only, no SRI there)")
+    summary["single_radar_far_held"] = far_held
     return summary
 
 
