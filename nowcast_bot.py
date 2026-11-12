@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import json
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -4403,7 +4404,33 @@ BOT_SINGLE_RADAR_CONFIRM_KM: float = 10.0
 # 12 Nov 4:01 AM alerts (only Karaikal MAXZ at 150-200 km saw them). In these hours a far echo seen by ONE radar,
 # with no SRI there, is not alerted at all (held at BOT_SRI_NO_RAIN_DBZ) unless another radar shows >= 35 dBZ within
 # BOT_SINGLE_RADAR_CONFIRM_KM. Daytime far echoes still alert, capped at Moderate.
-BOT_SINGLE_RADAR_NIGHT_IST: tuple = (21, 9)    # from 9 PM to 9 AM IST   # one line per SRI product per cycle, for calibration
+BOT_SINGLE_RADAR_NIGHT_IST = None    # 12 Nov 9 AM: replaced by the Ghats night rule below (Srikanth: "work backwards")
+
+# ---- night-time Ghats echoes (Kallakurichi / Salem / Namakkal) ----
+# 12 Nov 2026 (Srikanth): "Unless the storms have originated in the plains and travelled to the Ghats they are unlikely
+# to be real during night time ... if the trigger is localized and the storms are stationary in the Ghats of
+# Kallakurichi, Namakkal and Salem then let's ignore. Use a geo boundary for these storms alone."
+# Evidence (Karaikal MAXZ 4-12 Nov): night echo over these hills recurs in the same spots (nights of 10 & 11 Nov share
+# 57% of lit nodes, 0% if shifted 20 km), stays put (67% frame-to-frame overlap vs 27-40% for moving storms), peaks
+# 4-8 AM, and TNSDMA + Revenue gauges were dry under both alerts (11 Nov 8:21 AM, 12 Nov 4:01 AM). Afternoon storms
+# over the same hills are real convection and are left alone.
+# Rule, 9 PM-9 AM IST: an echo (>= 35 dBZ, any radar) that is mostly inside a Ghats box and was BORN there -- not
+# carried in from the plains and not an afternoon storm still going -- is held below alert strength inside the boxes.
+# Boxes drawn round the hills and checked against where the night echoes actually lit up (11.6-11.7N by Attur included).
+GHATS_NIGHT_ZONES: dict = {
+    "Kolli hills": (11.15, 11.45, 78.25, 78.47),
+    "Pachamalai": (11.15, 11.47, 78.50, 78.82),
+    "Bodhamalai": (11.43, 11.62, 78.22, 78.42),
+    "Kalvarayan / Attur gap": (11.60, 12.08, 78.50, 78.90),
+    "Shevaroy (Yercaud)": (11.72, 11.92, 78.10, 78.33),
+    "Chitteri": (11.88, 12.12, 78.38, 78.56),
+}
+GHATS_NIGHT_IST: tuple = (21, 9)          # 9 PM to 9 AM IST
+GHATS_AFTERNOON_IST: tuple = (12, 20)     # an echo born 12 noon-8 PM is afternoon convection: real
+GHATS_IN_ZONE_FRACTION: float = 0.5
+GHATS_MATCH_KM: float = 25.0              # same echo as last cycle if its centre is within this
+GHATS_TRACK_MAX_GAP_MIN: float = 30.0
+GHATS_TRACK_FILE = Path("state_social_test/ghats_night_tracks.json")   # one line per SRI product per cycle, for calibration
 BOT_SRI_CAP_DBZ: float = 44.0       # just below social_alerts.HEAVY_DBZ
 BOT_SRI_CHECK_KM: float = 6.0
 BOT_SRI_MOTION_KM_PER_MIN: float = 0.5
@@ -4566,8 +4593,11 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
     rad = max(1, int(round(BOT_SINGLE_RADAR_CONFIRM_KM / step_km)))
     far_held, far_dropped = {}, {}
     ist_hour = (now_utc + timedelta(hours=5, minutes=30)).hour
-    n0, n1 = BOT_SINGLE_RADAR_NIGHT_IST
-    night = ist_hour >= n0 or ist_hour < n1
+    if BOT_SINGLE_RADAR_NIGHT_IST:
+        n0, n1 = BOT_SINGLE_RADAR_NIGHT_IST
+        night = ist_hour >= n0 or ist_hour < n1
+    else:
+        night = False
     for p, g in list(regridded.items()):
         site = RADAR_SITES.get(PRODUCT_RADAR.get(p, ""), {})
         if "site_lat" not in site:
@@ -4603,6 +4633,73 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
     summary["single_radar_far_held"] = far_held
     summary["single_radar_far_night_dropped"] = far_dropped
     return summary
+
+
+def _ghats_night_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime) -> dict:
+    """Track >= 35 dBZ echoes cycle to cycle; at night hold those born inside the Ghats boxes. Returns a summary."""
+    ist = now_utc + timedelta(hours=5, minutes=30)
+    n0, n1 = GHATS_NIGHT_IST
+    is_night = ist.hour >= n0 or ist.hour < n1
+    a0, a1 = GHATS_AFTERNOON_IST
+    zone = np.zeros(lat2d.shape, dtype=bool)
+    for la0, la1, lo0, lo1 in GHATS_NIGHT_ZONES.values():
+        zone |= (lat2d >= la0) & (lat2d <= la1) & (lon2d >= lo0) & (lon2d <= lo1)
+    comp = None
+    for g in regridded.values():
+        comp = g if comp is None else np.fmax(comp, g)
+    strong = np.isfinite(comp) & (comp >= 35.0) if comp is not None else np.zeros(lat2d.shape, bool)
+    labels, n = ndimage.label(ndimage.binary_dilation(strong, iterations=1), structure=np.ones((3, 3)))
+    labels = np.where(strong, labels, 0)
+
+    prev = []
+    try:
+        old = json.loads(GHATS_TRACK_FILE.read_text())
+        gap = (now_utc - datetime.fromisoformat(old["t"])).total_seconds() / 60.0
+        if 0 <= gap <= GHATS_TRACK_MAX_GAP_MIN:
+            prev = old.get("echoes", [])
+    except Exception:
+        pass
+
+    echoes, held_nodes, held_names = [], 0, []
+    for k in range(1, n + 1):
+        m = labels == k
+        if not m.any():
+            continue
+        clat, clon = float(lat2d[m].mean()), float(lon2d[m].mean())
+        frac = float((m & zone).sum()) / float(m.sum())
+        best = None
+        for e in prev:
+            d = math.hypot((e["lat"] - clat) * 111.0, (e["lon"] - clon) * 111.0 * math.cos(math.radians(clat)))
+            if d <= GHATS_MATCH_KM and (best is None or d < best[0]):
+                best = (d, e)
+        if best:
+            born = best[1]["born"]
+            from_plains = best[1]["from_plains"] or frac < GHATS_IN_ZONE_FRACTION
+            afternoon = best[1]["afternoon"]
+        else:
+            born = ist.strftime("%H:%M")
+            from_plains = frac < GHATS_IN_ZONE_FRACTION
+            afternoon = a0 <= ist.hour < a1
+        e = {"lat": round(clat, 3), "lon": round(clon, 3), "nodes": int(m.sum()), "in_zone": round(frac, 2),
+             "born": born, "from_plains": bool(from_plains), "afternoon": bool(afternoon)}
+        hold_it = is_night and not from_plains and not afternoon and frac >= GHATS_IN_ZONE_FRACTION
+        e["held"] = bool(hold_it)
+        echoes.append(e)
+        if hold_it:
+            hm = m & zone
+            for p, g in list(regridded.items()):
+                regridded[p] = np.where(hm & np.isfinite(g) & (g > BOT_SRI_NO_RAIN_DBZ), BOT_SRI_NO_RAIN_DBZ, g)
+            held_nodes += int(hm.sum())
+            held_names.append(f"{clat:.2f}N {clon:.2f}E ({int(m.sum())} nodes, born {born} IST)")
+    try:
+        GHATS_TRACK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        GHATS_TRACK_FILE.write_text(json.dumps({"t": now_utc.isoformat(timespec="seconds"), "echoes": echoes}))
+    except Exception as ex:
+        print(f"[bot-export] ghats tracks not saved ({ex!r})")
+    if held_names:
+        print(f"[bot-export] Ghats night rule: {held_nodes} nodes held below alert strength -- "
+              + "; ".join(held_names))
+    return {"night": is_night, "echoes_tracked": len(echoes), "held_nodes": held_nodes}
 
 
 def export_bot_data(products: tuple | None = None, now_utc: datetime | None = None) -> dict | None:
@@ -4764,7 +4861,14 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
                 print(f"[bot-export] {p}: {weak_ids.size}/{n} far patches without a "
                       f"{BOT_LONG_RANGE_MIN_CORE_DBZ:.0f} dBZ core dropped ({int(drop.sum())} nodes)")
 
+    ghats_summary = {}
+    if regridded:
+        try:
+            ghats_summary = _ghats_night_hold(regridded, lat2d, lon2d, now_utc)
+        except Exception as ex:
+            print(f"[bot-export] Ghats night rule skipped ({ex!r})")
     sri_summary = _bot_sri_cap(regridded, age_h, lat2d, lon2d, now_utc) if regridded else {}
+    sri_summary["ghats_night"] = ghats_summary
 
     if not regridded:
         print("[bot-export] no usable radar this cycle -- writing an index that says so, no grid")
