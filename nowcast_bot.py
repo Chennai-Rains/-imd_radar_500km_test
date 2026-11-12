@@ -4635,6 +4635,86 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
     return summary
 
 
+# ---- two radars that see the same area must roughly agree ----
+# 13 Nov 2026, 1:30-4:30 AM IST: Karaikal (MAXZ, PPZ and SRI alike) filled with 45-55+ dBZ over Cuddalore, Perambalur,
+# Ariyalur and Thanjavur under clear skies (satellite), while Chennai MAXZ -- which sees Cuddalore / Villupuram well --
+# showed nothing. A week of frames (4-13 Nov) in the area both radars see within 200 km: on every real event where
+# Karaikal had >= 30 nodes >= 40 dBZ, 81-100% of them had Chennai >= 30 dBZ within 10 km; that night, 0%.
+# Rule: compare the two in that shared area. If one shows >= AGREE_MIN_NODES nodes >= 40 dBZ and the other agrees on
+# fewer than AGREE_MIN_SHARE of them, the first radar is not trusted -- ALL its products are held below alert
+# strength -- for this cycle and until it agrees again (at least AGREE_HOLD_MIN minutes). Needs both frames fresh.
+AGREE_PAIRS: tuple = (("karaikal", "kkl_maxz", ("kkl_maxz", "kkl_ppz")), ("chennai", "cni_maxz", ("cni_maxz", "cni_ppi")))
+AGREE_SHARED_KM: float = 200.0
+AGREE_MIN_NODES: int = 30
+AGREE_MIN_SHARE: float = 0.3
+AGREE_OK_SHARE: float = 0.6
+AGREE_NEAR_KM: float = 10.0
+AGREE_MAX_AGE_MIN: float = 20.0
+AGREE_HOLD_MIN: float = 60.0
+AGREE_STATE_FILE = Path("state_social_test/radar_agreement.json")
+
+
+def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d: np.ndarray,
+                          now_utc: datetime) -> dict:
+    try:
+        state = json.loads(AGREE_STATE_FILE.read_text())
+    except Exception:
+        state = {}
+    step_km = BOT_GRID_STEP_DEG * 111.0
+    size = 2 * max(1, int(round(AGREE_NEAR_KM / step_km))) + 1
+
+    def dist(site):
+        sd = RADAR_SITES[site]
+        return np.hypot((lat2d - sd["site_lat"]) * 111.0,
+                        (lon2d - sd["site_lon"]) * 111.0 * math.cos(math.radians(sd["site_lat"])))
+
+    (ra, pa, fam_a), (rb, pb, fam_b) = AGREE_PAIRS
+    verdict = {}
+    if pa in regridded and pb in regridded and age_h.get(pa, 9) * 60 <= AGREE_MAX_AGE_MIN \
+            and age_h.get(pb, 9) * 60 <= AGREE_MAX_AGE_MIN:
+        shared = (dist(ra) <= AGREE_SHARED_KM) & (dist(rb) <= AGREE_SHARED_KM)
+        ga, gb = regridded[pa], regridded[pb]
+        shared &= np.isfinite(ga) & np.isfinite(gb)     # both actually cover the node
+        for me, mine, other in ((ra, ga, gb), (rb, gb, ga)):
+            strong = shared & (mine >= 40.0)
+            if strong.sum() < AGREE_MIN_NODES:
+                continue
+            near = ndimage.maximum_filter((np.nan_to_num(other, nan=0.0) >= 30.0).astype(np.uint8), size=size) > 0
+            share = float((strong & near).sum()) / float(strong.sum())
+            verdict[me] = {"nodes": int(strong.sum()), "share": round(share, 2)}
+            if share < AGREE_MIN_SHARE:
+                until = now_utc + timedelta(minutes=AGREE_HOLD_MIN)
+                state[me] = {"distrust_until": until.isoformat(timespec="seconds"),
+                             "reason": f"{int(strong.sum())} nodes >= 40 dBZ, other radar agrees on {share:.0%}",
+                             "since": state.get(me, {}).get("since", now_utc.isoformat(timespec="seconds"))}
+            elif share >= AGREE_OK_SHARE and me in state:
+                print(f"[bot-export] radar check: {me} agrees again ({share:.0%}) -- trusted")
+                state.pop(me, None)
+    held = {}
+    for me, prod, fam in AGREE_PAIRS:
+        st = state.get(me)
+        if not st:
+            continue
+        if datetime.fromisoformat(st["distrust_until"]) < now_utc:
+            state.pop(me, None)
+            continue
+        for p in list(regridded):
+            if p in fam or PRODUCT_RADAR.get(p) == me:
+                g = regridded[p]
+                cut = np.isfinite(g) & (g > BOT_SRI_NO_RAIN_DBZ)
+                if cut.any():
+                    regridded[p] = np.where(cut, BOT_SRI_NO_RAIN_DBZ, g)
+                    held[p] = int(cut.sum())
+        print(f"[bot-export] radar check: {me} NOT trusted until {st['distrust_until']} ({st['reason']}) -- "
+              f"held below alert strength: {held}")
+    try:
+        AGREE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        AGREE_STATE_FILE.write_text(json.dumps(state))
+    except Exception as ex:
+        print(f"[bot-export] radar check state not saved ({ex!r})")
+    return {"checks": verdict, "distrusted": {k: v["distrust_until"] for k, v in state.items()}, "held": held}
+
+
 def _ghats_night_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime) -> dict:
     """Track >= 35 dBZ echoes cycle to cycle; at night hold those born inside the Ghats boxes. Returns a summary."""
     ist = now_utc + timedelta(hours=5, minutes=30)
@@ -4861,6 +4941,12 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
                 print(f"[bot-export] {p}: {weak_ids.size}/{n} far patches without a "
                       f"{BOT_LONG_RANGE_MIN_CORE_DBZ:.0f} dBZ core dropped ({int(drop.sum())} nodes)")
 
+    agree_summary = {}
+    if regridded:
+        try:
+            agree_summary = _radar_agreement_hold(regridded, age_h, lat2d, lon2d, now_utc)
+        except Exception as ex:
+            print(f"[bot-export] radar agreement check skipped ({ex!r})")
     ghats_summary = {}
     if regridded:
         try:
@@ -4869,6 +4955,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             print(f"[bot-export] Ghats night rule skipped ({ex!r})")
     sri_summary = _bot_sri_cap(regridded, age_h, lat2d, lon2d, now_utc) if regridded else {}
     sri_summary["ghats_night"] = ghats_summary
+    sri_summary["radar_agreement"] = agree_summary
 
     if not regridded:
         print("[bot-export] no usable radar this cycle -- writing an index that says so, no grid")
