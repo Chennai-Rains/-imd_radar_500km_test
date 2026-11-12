@@ -4654,12 +4654,98 @@ AGREE_HOLD_MIN: float = 60.0
 AGREE_STATE_FILE = Path("state_social_test/radar_agreement.json")
 
 
+# ---- satellite check of a whole radar (Meteosat IODC via EUMETView) ----
+# 13 Nov 2026 (Srikanth: "We can use eumetsat?"). fetch_satellite.py (run in the background by the workflow) saves
+# bit-packed masks: "cold" = IR10.8 cloud top (grey >= 100) and "rain" = any H-SAF h63 rain rate. The check compares
+# a radar's >= 40 dBZ nodes, from its archived frame nearest the satellite time, with the satellite within 15 km.
+# Replay 4-13 Nov (65 times): real Karaikal events had 76-100% of strong nodes under a cold top (median ~100%);
+# the 13 Nov junk 0-18%, with h63 rain 0-6%. Night hill echoes (62-84%) are NOT caught here (the Ghats rule does).
+# A radar fails when it has >= SAT_MIN_NODES strong nodes and BOTH shares are low; it is then distrusted (all its
+# products held below alert strength) through the shared radar_agreement state, like a radar that disagrees.
+SAT_DIR = Path("state_social_test/sat")
+SAT_MAX_AGE_MIN: float = 90.0
+SAT_MATCH_MIN: float = 8.0
+SAT_NEAR_KM: float = 15.0
+SAT_MIN_NODES: int = 50
+SAT_MAX_COLD_SHARE: float = 0.3
+SAT_MAX_RAIN_SHARE: float = 0.15
+SAT_OK_COLD_SHARE: float = 0.6
+SAT_RADAR_PRODUCT: dict = {"karaikal": "kkl_maxz", "chennai": "cni_maxz", "niot": "maxz", "trivandrum": "tvm_ppi"}
+
+
+def _satellite_radar_check(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime, state: dict) -> dict:
+    files = sorted(SAT_DIR.glob("sat_*.npz"))
+    if not files:
+        return {"used": False, "why": "no satellite file"}
+    f = files[-1]
+    st = datetime.strptime(f.stem[4:], "%Y%m%dT%H%M").replace(tzinfo=timezone.utc)
+    if (now_utc - st).total_seconds() / 60.0 > SAT_MAX_AGE_MIN:
+        return {"used": False, "why": f"satellite {f.stem[4:]} too old"}
+    z = np.load(f)
+    shape = tuple(int(v) for v in z["shape"])
+    cold = np.unpackbits(z["cold"])[: shape[0] * shape[1]].reshape(shape).astype(bool)
+    rain = np.unpackbits(z["rain"])[: shape[0] * shape[1]].reshape(shape).astype(bool)
+    la0, lo0, la1, lo1 = (float(v) for v in z["bbox"])
+    step = float(z["step"])
+    rows = np.floor((la1 - lat2d) / step).astype(int)
+    cols = np.floor((lon2d - lo0) / step).astype(int)
+    inside = (rows >= 0) & (rows < shape[0]) & (cols >= 0) & (cols < shape[1])
+    rr, cc = rows.clip(0, shape[0] - 1), cols.clip(0, shape[1] - 1)
+    k = 2 * max(1, int(round(SAT_NEAR_KM / (BOT_GRID_STEP_DEG * 111.0)))) + 1
+    cold_near = ndimage.maximum_filter((cold[rr, cc] & inside).astype(np.uint8), size=k) > 0
+    rain_near = ndimage.maximum_filter((rain[rr, cc] & inside).astype(np.uint8), size=k) > 0
+    out = {"used": True, "sat_time": st.isoformat(timespec="minutes"), "radars": {}}
+    for radar, prod in SAT_RADAR_PRODUCT.items():
+        best = None
+        for g in ARCHIVE_DIR.glob(f"{prod}_*.gif"):
+            m = re.search(r"(\d{8}T\d{6})Z", g.name)
+            if not m:
+                continue
+            t = datetime.strptime(m.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+            d = abs((t - st).total_seconds()) / 60.0
+            if d <= SAT_MATCH_MIN and (best is None or d < best[0]):
+                best = (d, g)
+        if best is None:
+            continue
+        try:
+            img = Image.open(best[1])
+            dbz = decode_reflectivity(img, prod, build_lut_from_colorbar(img, prod))
+            grid = _bot_regrid_dbz(dbz, prod, lat2d, lon2d)
+        except Exception as ex:
+            print(f"[bot-export] satellite check: {prod} frame unreadable ({ex!r})")
+            continue
+        strong = inside & np.isfinite(grid) & (grid >= 40.0)
+        n = int(strong.sum())
+        if n < SAT_MIN_NODES:
+            out["radars"][radar] = {"nodes": n}
+            continue
+        cs = float((strong & cold_near).sum()) / n
+        rs = float((strong & rain_near).sum()) / n
+        out["radars"][radar] = {"nodes": n, "cold_share": round(cs, 2), "rain_share": round(rs, 2),
+                                "frame": best[1].name}
+        if cs < SAT_MAX_COLD_SHARE and rs < SAT_MAX_RAIN_SHARE:
+            until = now_utc + timedelta(minutes=AGREE_HOLD_MIN)
+            state[radar] = {"distrust_until": until.isoformat(timespec="seconds"),
+                            "reason": f"satellite {st:%H:%M}Z: {n} nodes >= 40 dBZ, {cs:.0%} under cloud tops, "
+                                      f"{rs:.0%} under satellite rain",
+                            "since": state.get(radar, {}).get("since", now_utc.isoformat(timespec="seconds")),
+                            "by": "satellite"}
+        elif cs >= SAT_OK_COLD_SHARE and state.get(radar, {}).get("by") == "satellite":
+            print(f"[bot-export] satellite check: {radar} matches the satellite again ({cs:.0%}) -- trusted")
+            state.pop(radar, None)
+    return out
+
+
 def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d: np.ndarray,
                           now_utc: datetime) -> dict:
     try:
         state = json.loads(AGREE_STATE_FILE.read_text())
     except Exception:
         state = {}
+    try:
+        sat = _satellite_radar_check(lat2d, lon2d, now_utc, state)
+    except Exception as ex:
+        sat = {"used": False, "why": repr(ex)}
     step_km = BOT_GRID_STEP_DEG * 111.0
     size = 2 * max(1, int(round(AGREE_NEAR_KM / step_km))) + 1
 
@@ -4687,17 +4773,19 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
                 state[me] = {"distrust_until": until.isoformat(timespec="seconds"),
                              "reason": f"{int(strong.sum())} nodes >= 40 dBZ, other radar agrees on {share:.0%}",
                              "since": state.get(me, {}).get("since", now_utc.isoformat(timespec="seconds"))}
-            elif share >= AGREE_OK_SHARE and me in state:
+            elif share >= AGREE_OK_SHARE and me in state and state[me].get("by") != "satellite":
                 print(f"[bot-export] radar check: {me} agrees again ({share:.0%}) -- trusted")
                 state.pop(me, None)
     held = {}
-    for me, prod, fam in AGREE_PAIRS:
+    fams = {me: fam for me, _, fam in AGREE_PAIRS}
+    for me in list(state):
         st = state.get(me)
         if not st:
             continue
         if datetime.fromisoformat(st["distrust_until"]) < now_utc:
             state.pop(me, None)
             continue
+        fam = fams.get(me, ())
         for p in list(regridded):
             if p in fam or PRODUCT_RADAR.get(p) == me:
                 g = regridded[p]
@@ -4712,7 +4800,8 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
         AGREE_STATE_FILE.write_text(json.dumps(state))
     except Exception as ex:
         print(f"[bot-export] radar check state not saved ({ex!r})")
-    return {"checks": verdict, "distrusted": {k: v["distrust_until"] for k, v in state.items()}, "held": held}
+    return {"checks": verdict, "satellite": sat,
+            "distrusted": {k: v["distrust_until"] for k, v in state.items()}, "held": held}
 
 
 def _ghats_night_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime) -> dict:

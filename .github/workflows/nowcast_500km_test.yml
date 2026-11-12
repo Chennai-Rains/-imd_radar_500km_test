@@ -82,6 +82,12 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      # 13 Nov 2026: Meteosat IODC satellite masks for the radar-health check (nowcast_bot._satellite_radar_check).
+      # Runs in the background so a slow EUMETSAT server never delays the map; whatever it saves is used by the
+      # NEXT runs (state_social_test/sat/), and a missed fetch just means the check uses the last file (<= 90 min).
+      - name: Start the satellite fetch (background)
+        run: nohup python fetch_satellite.py > sat_fetch.log 2>&1 &
+
       - name: Run one-off test pipeline (Karaikal on kkl_ppz/500km, NIOT + Kochi unchanged)
         # Telegram secrets feed the SHADOW-MODE alert drafts (social_alerts.py,
         # called at the end of test_500km_pipeline.py): a private review chat,
@@ -117,6 +123,10 @@ jobs:
             git stash pop || true
           fi
         continue-on-error: true
+
+      - name: Satellite fetch log
+        if: ${{ !cancelled() }}
+        run: cat sat_fetch.log 2>/dev/null || echo "no satellite log"
 
       - name: Commit updated tracking state + frame archive
         # Needed for direction arrows: track_cells() compares this run's
