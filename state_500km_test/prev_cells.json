@@ -15,11 +15,8 @@
       "range_km": 123.2,
       "beam_height_km": 0.0,
       "elevated": false,
-      "velocity_kmh": [
-        50.2,
-        188.0
-      ],
-      "trend": "unknown",
+      "velocity_kmh": null,
+      "trend": "steady",
       "confirmed_at_surface": false
     }
   ],
@@ -271,40 +268,61 @@
       "id": 1,
       "product": "mpt_maxz",
       "centroid_latlon": [
-        16.62018796020363,
-        82.27371010099756
+        16.720322707424213,
+        82.99199175163339
       ],
-      "max_dbz": 57.3,
-      "pixel_count": 71,
-      "px": 479.6901408450704,
-      "py": 260.3943661971831,
-      "range_km": 129.6,
+      "max_dbz": 39.8,
+      "pixel_count": 84,
+      "px": 579.2619047619048,
+      "py": 245.9404761904762,
+      "range_km": 205.6,
       "beam_height_km": 0.0,
       "elevated": false,
       "velocity_kmh": [
-        0.5,
-        1.0
+        23.5,
+        181.0
       ],
-      "trend": "steady",
+      "trend": "unknown",
       "confirmed_at_surface": false
     },
     {
       "id": 2,
       "product": "mpt_maxz",
       "centroid_latlon": [
-        16.184154645879346,
-        81.14546981947107
+        16.61915050083648,
+        82.27414190747479
+      ],
+      "max_dbz": 51.8,
+      "pixel_count": 68,
+      "px": 479.75,
+      "py": 260.54411764705884,
+      "range_km": 129.6,
+      "beam_height_km": 0.0,
+      "elevated": false,
+      "velocity_kmh": [
+        0.5,
+        141.0
+      ],
+      "trend": "weakening",
+      "confirmed_at_surface": false
+    },
+    {
+      "id": 3,
+      "product": "mpt_maxz",
+      "centroid_latlon": [
+        16.183509402593828,
+        81.14540874083652
       ],
       "max_dbz": 39.8,
-      "pixel_count": 66,
-      "px": 323.2878787878788,
-      "py": 323.3333333333333,
+      "pixel_count": 68,
+      "px": 323.27941176470586,
+      "py": 323.4264705882353,
       "range_km": 0.2,
       "beam_height_km": 0.0,
       "elevated": false,
       "velocity_kmh": [
-        0.7,
-        333.0
+        0.6,
+        160.0
       ],
       "trend": "steady",
       "confirmed_at_surface": false
