@@ -4,37 +4,22 @@ permissions: {contents: write}
 jobs:
   probe:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TIMES: "2026-11-04T07:45:00Z 2026-11-04T09:00:00Z 2026-11-04T10:15:00Z 2026-11-04T11:00:00Z 2026-11-04T12:00:00Z 2026-11-04T17:30:00Z 2026-11-06T06:15:00Z 2026-11-06T07:00:00Z 2026-11-06T08:30:00Z 2026-11-06T09:00:00Z 2026-11-06T10:15:00Z 2026-11-06T11:00:00Z 2026-11-06T12:00:00Z 2026-11-06T16:30:00Z 2026-11-06T17:00:00Z 2026-11-06T18:00:00Z 2026-11-06T19:00:00Z 2026-11-06T20:00:00Z 2026-11-06T21:00:00Z 2026-11-06T22:15:00Z 2026-11-06T23:00:00Z 2026-11-07T10:00:00Z 2026-11-07T11:00:00Z 2026-11-07T23:00:00Z 2026-11-08T00:00:00Z 2026-11-08T01:15:00Z 2026-11-08T02:00:00Z 2026-11-08T03:00:00Z 2026-11-08T04:00:00Z 2026-11-08T05:00:00Z 2026-11-08T06:00:00Z 2026-11-08T10:00:00Z 2026-11-08T11:00:00Z 2026-11-08T12:00:00Z 2026-11-09T06:30:00Z 2026-11-09T07:00:00Z 2026-11-09T08:00:00Z 2026-11-09T09:00:00Z 2026-11-09T10:00:00Z 2026-11-09T14:45:00Z 2026-11-09T17:00:00Z 2026-11-09T19:30:00Z 2026-11-09T20:00:00Z 2026-11-09T21:00:00Z 2026-11-09T22:00:00Z 2026-11-09T23:00:00Z 2026-11-10T00:00:00Z 2026-11-10T01:00:00Z 2026-11-11T02:00:00Z 2026-11-11T03:00:00Z 2026-11-11T21:30:00Z 2026-11-11T22:15:00Z 2026-11-11T23:00:00Z 2026-11-12T20:00:00Z 2026-11-12T20:15:00Z 2026-11-12T20:30:00Z 2026-11-12T20:45:00Z 2026-11-12T21:00:00Z 2026-11-12T21:15:00Z 2026-11-12T21:30:00Z 2026-11-12T21:45:00Z 2026-11-12T22:00:00Z 2026-11-12T22:15:00Z 2026-11-12T22:30:00Z 2026-11-12T22:45:00Z "
     steps:
       - run: |
           mkdir out && cd out
-          W=https://view.eumetsat.int/geoserver/wms
-          curl -s -m 120 -o caps.xml "$W?service=WMS&version=1.3.0&request=GetCapabilities" -w "caps %{http_code} %{size_download}\n"
-          python3 - <<'P'
-          import re
-          x=open('caps.xml',encoding='utf-8',errors='ignore').read()
-          names=re.findall(r'<Layer[^>]*>\s*<Name>([^<]+)</Name>\s*<Title>([^<]*)</Title>',x)
-          sel=[(n,t) for n,t in names if 'iodc' in n.lower() or 'iodc' in t.lower() or 'Indian' in t]
-          open('iodc_layers.txt','w').write("\n".join(f"{n}\t{t}" for n,t in sel))
-          print(len(names),"layers,",len(sel),"IODC")
-          # time extent of a few
-          for n,t in sel:
-              i=x.find('<Name>'+n+'</Name>'); m=re.search(r'<Dimension name="time"[^>]*>([^<]{0,300})',x[i:i+6000])
-              if m: open('iodc_layers.txt','a').write(f"\n## {n} time: ...{m.group(1)[-120:]}")
-          P
-          for L in msg_iodc:cth msg_iodc:h63 msg_iodc:ir108 msg_iodc:clm; do
-            f=$(echo $L | tr ':' '_')
-            curl -s -m 120 -o ${f}_legend.png "$W?service=WMS&version=1.3.0&request=GetLegendGraphic&layer=$L&format=image/png" -w "legend $L %{http_code} %{size_download}\n"
-            for T in 2026-11-12T22:30:00Z 2026-11-12T23:00:00Z 2026-11-12T10:30:00Z; do
-              curl -s -m 150 -o ${f}_$T.png "$W?service=WMS&version=1.3.0&request=GetMap&layers=$L&styles=&crs=EPSG:4326&bbox=8,76,14.5,81.5&width=550&height=650&format=image/png&time=$T" -w "$L $T %{http_code} %{content_type} %{size_download} %{time_total}s\n"
+          get() {
+            L=$1; T=$2; f=$(echo ${L}_$T | tr ':' '_').png
+            for k in 1 2 3 4 5; do
+              code=$(curl -s -m 90 -o $f -w "%{http_code}" "https://view.eumetsat.int/geoserver/wms?service=WMS&version=1.3.0&request=GetMap&layers=$L&styles=&crs=EPSG:4326&bbox=8,76,14.5,81.5&width=550&height=650&format=image/png&time=$T")
+              [ "$code" = 200 ] && file $f | grep -q PNG && { echo "ok $L $T try $k"; return; }
+              sleep $((k*10))
             done
-          done
-          python3 - <<'P'
-          import re
-          x=open('caps.xml',encoding='utf-8',errors='ignore').read()
-          for n in ('msg_iodc:cth','msg_iodc:h63','msg_iodc:ir108'):
-              i=x.find('<Name>'+n+'</Name>'); seg=x[i:i+5000]
-              open('styles.txt','a').write(n+"\n"+"\n".join(re.findall(r'<Style>.*?</Style>',seg,re.S))[:1500]+"\n\n")
-          P
-          ls -la
+            rm -f $f; echo "FAIL $L $T"
+          }
+          export -f get
+          for L in msg_iodc:h63 msg_iodc:ir108; do for T in $TIMES; do echo "$L $T"; done; done | xargs -P 6 -L 1 bash -c 'get $0 $1' | sort | tee log.txt | grep -c ok || true
           git init -q -b eumetsat-probe && git add . && git -c user.name=bot -c user.email=bot@x commit -qm probe
           git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" eumetsat-probe
