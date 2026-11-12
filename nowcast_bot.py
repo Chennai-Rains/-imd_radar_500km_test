@@ -4398,7 +4398,12 @@ BOT_SRI_RAIN_MMH: float = 7.6        # Karaikal SRI: anything in the lowest bin 
 BOT_SRI_RAIN_MMH_BY_PRODUCT: dict = {"cni_sri": 6.3}
 BOT_SRI_NO_RAIN_DBZ: float = 34.0    # just below social_alerts.ALERT_DBZ (35)
 BOT_SINGLE_RADAR_FAR_KM: float = 150.0
-BOT_SINGLE_RADAR_CONFIRM_KM: float = 10.0   # one line per SRI product per cycle, for calibration
+BOT_SINGLE_RADAR_CONFIRM_KM: float = 10.0
+# 12 Nov 2026: TNSDMA gauges dry across Salem / Namakkal / Kallakurichi / Perambalur for both the 11 Nov 8:21 AM and the
+# 12 Nov 4:01 AM alerts (only Karaikal MAXZ at 150-200 km saw them). In these hours a far echo seen by ONE radar,
+# with no SRI there, is not alerted at all (held at BOT_SRI_NO_RAIN_DBZ) unless another radar shows >= 35 dBZ within
+# BOT_SINGLE_RADAR_CONFIRM_KM. Daytime far echoes still alert, capped at Moderate.
+BOT_SINGLE_RADAR_NIGHT_IST: tuple = (21, 9)    # from 9 PM to 9 AM IST   # one line per SRI product per cycle, for calibration
 BOT_SRI_CAP_DBZ: float = 44.0       # just below social_alerts.HEAVY_DBZ
 BOT_SRI_CHECK_KM: float = 6.0
 BOT_SRI_MOTION_KM_PER_MIN: float = 0.5
@@ -4559,7 +4564,10 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
     # single far radar: Heavy needs a second radar where no SRI judges
     step_km = step * 111.0
     rad = max(1, int(round(BOT_SINGLE_RADAR_CONFIRM_KM / step_km)))
-    far_held = {}
+    far_held, far_dropped = {}, {}
+    ist_hour = (now_utc + timedelta(hours=5, minutes=30)).hour
+    n0, n1 = BOT_SINGLE_RADAR_NIGHT_IST
+    night = ist_hour >= n0 or ist_hour < n1
     for p, g in list(regridded.items()):
         site = RADAR_SITES.get(PRODUCT_RADAR.get(p, ""), {})
         if "site_lat" not in site:
@@ -4567,12 +4575,24 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
         dist = np.hypot((lat2d - site["site_lat"]) * 111.0,
                         (lon2d - site["site_lon"]) * 111.0 * np.cos(np.radians(site["site_lat"])))
         cand = np.isfinite(g) & (g > BOT_SRI_CAP_DBZ) & (dist > BOT_SINGLE_RADAR_FAR_KM) & ~judged
-        if not cand.any():
+        if not cand.any() and not night:
             continue
         other = np.zeros(lat2d.shape, dtype=bool)
+        other_rain = np.zeros(lat2d.shape, dtype=bool)
         for q, h in regridded.items():
             if PRODUCT_RADAR.get(q) != PRODUCT_RADAR.get(p):
                 other |= np.isfinite(h) & (h >= BOT_SRI_CAP_DBZ + 1.0)
+                other_rain |= np.isfinite(h) & (h > BOT_SRI_NO_RAIN_DBZ)
+        if night:
+            far_rain = (np.isfinite(g) & (g > BOT_SRI_NO_RAIN_DBZ) & (dist > BOT_SINGLE_RADAR_FAR_KM) & ~judged
+                        & ~ndimage.maximum_filter(other_rain.astype(np.uint8), size=2 * rad + 1).astype(bool))
+            if far_rain.any():
+                g = np.where(far_rain, BOT_SRI_NO_RAIN_DBZ, g)
+                regridded[p] = g
+                far_dropped[p] = int(far_rain.sum())
+                print(f"[bot-export] {p}: {int(far_rain.sum())} nodes beyond {BOT_SINGLE_RADAR_FAR_KM:.0f} km held below "
+                      f"alert strength (night, one radar only, no SRI there)")
+                cand = cand & ~far_rain
         confirmed = ndimage.maximum_filter(other.astype(np.uint8), size=2 * rad + 1).astype(bool)
         hold = cand & ~confirmed
         if hold.any():
@@ -4581,6 +4601,7 @@ def _bot_sri_cap(regridded: dict, age_h: dict, lat2d, lon2d, now_utc: datetime) 
             print(f"[bot-export] {p}: {int(hold.sum())} nodes beyond {BOT_SINGLE_RADAR_FAR_KM:.0f} km held below Heavy "
                   f"(one radar only, no SRI there)")
     summary["single_radar_far_held"] = far_held
+    summary["single_radar_far_night_dropped"] = far_dropped
     return summary
 
 
