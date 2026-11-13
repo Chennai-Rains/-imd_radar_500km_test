@@ -3261,6 +3261,47 @@ document.addEventListener("DOMContentLoaded", function() {{
 """
 
 
+def _apply_map_holds(product: str, arr: np.ndarray) -> np.ndarray:
+    """Cap the product's picture where the alert checks capped it (export_bot_data -> _map_holds["caps"])."""
+    cap = _map_holds.get("caps", {}).get(product)
+    if cap is None:
+        return arr
+    lats, lons = _map_holds["lats"], _map_holds["lons"]
+    ys, xs = np.indices(arr.shape)
+    l, t = PRODUCTS[product]["plot_bbox"][:2]
+    plat, plon = pixel_to_latlon(xs + l, ys + t, product)
+    step_lat = lats[1] - lats[0]
+    step_lon = lons[1] - lons[0]
+    i = np.rint((plat - lats[0]) / step_lat).astype(int)
+    j = np.rint((plon - lons[0]) / step_lon).astype(int)
+    ok = (i >= 0) & (i < len(lats)) & (j >= 0) & (j < len(lons))
+    c = np.full(arr.shape, np.nan)
+    c[ok] = cap[i[ok], j[ok]]
+    held = np.isfinite(c) & np.isfinite(arr) & (arr > c)
+    if not held.any():
+        return arr
+    out = arr.copy()
+    out[held] = c[held]
+    return out
+
+
+def _cell_held_below_alert(cell) -> bool:
+    """True if the alert checks held this cell's centre below alert strength (no marker/arrow for it)."""
+    caps = _map_holds.get("caps", {})
+    if not caps or "lats" not in _map_holds:
+        return False
+    try:
+        la, lo = cell.centroid_latlon
+    except Exception:
+        return False
+    lats, lons = _map_holds["lats"], _map_holds["lons"]
+    i = int(round((la - lats[0]) / (lats[1] - lats[0]))); j = int(round((lo - lons[0]) / (lons[1] - lons[0])))
+    if not (0 <= i < len(lats) and 0 <= j < len(lons)):
+        return False
+    vals = [c[i, j] for c in caps.values() if np.isfinite(c[i, j])]
+    return bool(vals) and max(vals) < 35.0
+
+
 def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
                         lead_times_min: tuple = (30, 60, 90),
                         min_speed_kmh: float = 5.0,
@@ -3431,10 +3472,19 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
     # own picture (no blending from the others) and no storm markers. One choice at a time (radio buttons), so
     # semi-transparent pictures never stack. The choice is remembered across the page's auto-refresh.
     fresh_rasters = {p: a for p, a in _last_dbz.items() if p in fresh_products}
-    rasters_to_draw = _mask_stale_overlap(fresh_rasters, products)
+    # 13 Nov 2026: same conditions as the alerts -- a radar the checks don't trust is left out of the combined view
+    # and its storms get no markers/arrows (its own view in the chooser still shows the raw picture, labelled), and
+    # areas the checks held back are drawn at the held strength.
+    distrusted = set(_map_holds.get("distrusted", {}))
+    if distrusted:
+        print(f"[render] not trusted, left out of the combined view: {', '.join(sorted(distrusted))}")
+    fresh_rasters = {p: _apply_map_holds(p, a) for p, a in fresh_rasters.items()}
+    rasters_to_draw = _mask_stale_overlap(
+        {p: a for p, a in fresh_rasters.items() if PRODUCT_RADAR.get(p) not in distrusted}, products)
     radars_with_picture = []
     for p in products:
-        if p in rasters_to_draw and PRODUCT_RADAR[p] not in radars_with_picture:
+        if (p in rasters_to_draw or (PRODUCT_RADAR.get(p) in distrusted and p in fresh_rasters)) \
+                and PRODUCT_RADAR[p] not in radars_with_picture:
             radars_with_picture.append(PRODUCT_RADAR[p])
     radars_with_picture.sort(key=lambda r: MAP_CHOOSER_ORDER.index(r) if r in MAP_CHOOSER_ORDER else 99)
     use_chooser = MAP_RADAR_CHOOSER and len(radars_with_picture) > 1
@@ -3464,10 +3514,12 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
             chooser_groups[r] = g.get_name()
 
     do_fuse = fuse and len({PRODUCT_RADAR[p] for p in products}) > 1
+    cell_products = [p for p in fresh_products if PRODUCT_RADAR.get(p) not in distrusted]
     if do_fuse:
-        cells_to_project = cluster_cells([c for p in fresh_products for c in _prev_cells.get(p, [])])
+        cells_to_project = cluster_cells([c for p in cell_products for c in _prev_cells.get(p, [])])
     else:
-        cells_to_project = [c for p in fresh_products for c in _prev_cells.get(p, [])]
+        cells_to_project = [c for p in cell_products for c in _prev_cells.get(p, [])]
+    cells_to_project = [c for c in cells_to_project if not _cell_held_below_alert(c)]
 
     # Registry feeding build_cell_zoom_declutter_script() below -- each
     # entry is (this layer's Leaflet JS variable name, its parent cell's
@@ -4380,6 +4432,7 @@ def _bot_speed_bearing(u: float, v: float) -> tuple[float, float]:
 # range it overstates what reaches the ground. Wherever a fresh SRI frame looks, an echo may only stay at Heavy
 # strength (>= BOT_SRI_CAP_DBZ + 1) if SRI shows >= BOT_SRI_HEAVY_MMH within the neighbourhood; otherwise it is held
 # just below Heavy. The rain itself is kept (it still counts as Moderate) -- SRI never removes or adds echo.
+_map_holds: dict = {}       # filled by export_bot_data, read by build_forecast_map (same run)
 BOT_SRI_PRODUCTS: tuple = ("kkl_sri", "cni_sri")
 BOT_SRI_HEAVY_MMH: float = 21.0     # SRI bin 21-27 mm/h or above (Z = 200 R^1.6: 45 dBZ ~ 24 mm/h)
 # Chennai's bands double (6.3 / 12.6 / 25.1 / 50.1): 21 mm/h falls inside 12.6-25.1, so that band counts as heavy.
@@ -5030,6 +5083,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
                 print(f"[bot-export] {p}: {weak_ids.size}/{n} far patches without a "
                       f"{BOT_LONG_RANGE_MIN_CORE_DBZ:.0f} dBZ core dropped ({int(drop.sum())} nodes)")
 
+    _orig_for_map = {p: g.copy() for p, g in regridded.items()}
     agree_summary = {}
     if regridded:
         try:
@@ -5045,6 +5099,28 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     sri_summary = _bot_sri_cap(regridded, age_h, lat2d, lon2d, now_utc) if regridded else {}
     sri_summary["ghats_night"] = ghats_summary
     sri_summary["radar_agreement"] = agree_summary
+    # 13 Nov 2026 (Srikanth: "update the live map as well with the same conditions we are following for the alerts"):
+    # hand the map what the checks above changed -- per product, the strength each held node was capped at -- and
+    # which radars are not trusted right now. build_forecast_map (run after this) draws with them.
+    try:
+        _map_holds["caps"] = {}
+        for p, g in regridded.items():
+            o = _orig_for_map.get(p)
+            if o is None:
+                continue
+            lowered = np.isfinite(o) & np.isfinite(g) & (g < o - 0.01)
+            if lowered.any():
+                _map_holds["caps"][p] = np.where(lowered, g, np.nan)
+        _map_holds["lats"], _map_holds["lons"] = lats, lons
+        _map_holds["distrusted"] = {
+            k: v for k, v in (agree_summary.get("distrusted") or {}).items()}
+        try:
+            st = json.loads(AGREE_STATE_FILE.read_text())
+            _map_holds["reasons"] = {k: v.get("reason", "") for k, v in st.items()}
+        except Exception:
+            _map_holds["reasons"] = {}
+    except Exception as ex:
+        print(f"[bot-export] map holds not prepared ({ex!r})")
 
     if not regridded:
         print("[bot-export] no usable radar this cycle -- writing an index that says so, no grid")
@@ -5329,15 +5405,17 @@ def run_pipeline() -> None:
             print(f"  {product} cell {c.id}: {c.centroid_latlon}, {c.max_dbz:.0f} dBZ, "
                   f"trend={c.trend}, velocity={c.velocity_kmh} {tag}")
 
-    build_forecast_map(products=POLLED_PRODUCTS, fuse=True, out_html=str(OUTPUT_HTML))
-    print(f"Wrote {OUTPUT_HTML}")
-
     # Data copy of this cycle for the query bot -- see the BOT DATA EXPORT
     # block above. Never allowed to take the map down with it.
+    # 13 Nov 2026: now runs BEFORE the map, so the map can draw with the same checks the alerts use (_map_holds).
     try:
         export_bot_data(POLLED_PRODUCTS)
     except Exception as e:
-        print(f"[bot-export] failed (the map above is unaffected): {e!r}")
+        print(f"[bot-export] failed (the map below is drawn without the alert checks): {e!r}")
+        _map_holds.clear()
+
+    build_forecast_map(products=POLLED_PRODUCTS, fuse=True, out_html=str(OUTPUT_HTML))
+    print(f"Wrote {OUTPUT_HTML}")
 
 
 if __name__ == "__main__":
