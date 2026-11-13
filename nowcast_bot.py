@@ -3264,7 +3264,8 @@ document.addEventListener("DOMContentLoaded", function() {{
 def _apply_map_holds(product: str, arr: np.ndarray) -> np.ndarray:
     """Cap the product's picture where the alert checks capped it (export_bot_data -> _map_holds["caps"])."""
     cap = _map_holds.get("caps", {}).get(product)
-    if cap is None:
+    blank = _map_holds.get("blank", {}).get(product)
+    if cap is None and blank is None:
         return arr
     lats, lons = _map_holds["lats"], _map_holds["lons"]
     ys, xs = np.indices(arr.shape)
@@ -3275,13 +3276,17 @@ def _apply_map_holds(product: str, arr: np.ndarray) -> np.ndarray:
     i = np.rint((plat - lats[0]) / step_lat).astype(int)
     j = np.rint((plon - lons[0]) / step_lon).astype(int)
     ok = (i >= 0) & (i < len(lats)) & (j >= 0) & (j < len(lons))
-    c = np.full(arr.shape, np.nan)
-    c[ok] = cap[i[ok], j[ok]]
-    held = np.isfinite(c) & np.isfinite(arr) & (arr > c)
-    if not held.any():
-        return arr
     out = arr.copy()
-    out[held] = c[held]
+    if cap is not None:
+        c = np.full(arr.shape, np.nan)
+        c[ok] = cap[i[ok], j[ok]]
+        held = np.isfinite(c) & np.isfinite(arr) & (arr > c)
+        out[held] = c[held]
+    if blank is not None:
+        # a radar that is not trusted: its echo is removed from the picture except where the satellite backs it
+        b = np.zeros(arr.shape, dtype=bool)
+        b[ok] = blank[i[ok], j[ok]]
+        out[b] = np.nan
     return out
 
 
@@ -3477,14 +3482,13 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
     # areas the checks held back are drawn at the held strength.
     distrusted = set(_map_holds.get("distrusted", {}))
     if distrusted:
-        print(f"[render] not trusted, left out of the combined view: {', '.join(sorted(distrusted))}")
+        print(f"[render] not trusted -- drawn only where the satellite backs it: {', '.join(sorted(distrusted))}")
+    raw_rasters = dict(fresh_rasters)
     fresh_rasters = {p: _apply_map_holds(p, a) for p, a in fresh_rasters.items()}
-    rasters_to_draw = _mask_stale_overlap(
-        {p: a for p, a in fresh_rasters.items() if PRODUCT_RADAR.get(p) not in distrusted}, products)
+    rasters_to_draw = _mask_stale_overlap(fresh_rasters, products)
     radars_with_picture = []
     for p in products:
-        if (p in rasters_to_draw or (PRODUCT_RADAR.get(p) in distrusted and p in fresh_rasters)) \
-                and PRODUCT_RADAR[p] not in radars_with_picture:
+        if p in rasters_to_draw and PRODUCT_RADAR[p] not in radars_with_picture:
             radars_with_picture.append(PRODUCT_RADAR[p])
     radars_with_picture.sort(key=lambda r: MAP_CHOOSER_ORDER.index(r) if r in MAP_CHOOSER_ORDER else 99)
     use_chooser = MAP_RADAR_CHOOSER and len(radars_with_picture) > 1
@@ -3509,12 +3513,12 @@ def build_forecast_map(products: tuple = ("maxz",), fuse: bool = False,
             own = [p for p in products if PRODUCT_RADAR[p] == r and p in fresh_rasters]
             g = folium.FeatureGroup(name=RADAR_MARKER_LABEL.get(r, r), show=False)
             for p in own:
-                _draw_raster(p, fresh_rasters[p], g, suffix="_own")
+                _draw_raster(p, raw_rasters[p] if r in distrusted else fresh_rasters[p], g, suffix="_own")
             g.add_to(m)
             chooser_groups[r] = g.get_name()
 
     do_fuse = fuse and len({PRODUCT_RADAR[p] for p in products}) > 1
-    cell_products = [p for p in fresh_products if PRODUCT_RADAR.get(p) not in distrusted]
+    cell_products = list(fresh_products)
     if do_fuse:
         cells_to_project = cluster_cells([c for p in cell_products for c in _prev_cells.get(p, [])])
     else:
@@ -4724,6 +4728,33 @@ SAT_MAX_COLD_SHARE: float = 0.3
 SAT_MAX_RAIN_SHARE: float = 0.15
 SAT_OK_COLD_SHARE: float = 0.6
 SAT_RADAR_PRODUCT: dict = {"karaikal": "kkl_maxz", "chennai": "cni_maxz", "niot": "maxz", "trivandrum": "tvm_ppi"}
+# 13 Nov 2026 (Srikanth: "We can add as a fall back"): while a radar is NOT trusted, its echo is still kept where the
+# satellite shows a cold cloud top within SAT_FALLBACK_KM (capped at Moderate, and only in patches of >= 3 nodes).
+# 13 Nov 5:12 AM: kept 41 of 44 nodes of the real showers off Vedaranyam, 64 of 1,440 nodes of the inland junk.
+SAT_FALLBACK_KM: float = 5.0
+SAT_FALLBACK_MIN_NODES: int = 3
+
+
+def _satellite_cold_near(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime, km: float):
+    """Bot-grid mask: a cold cloud top within `km`, from the newest satellite file (<= SAT_MAX_AGE_MIN). None if none."""
+    files = sorted(SAT_DIR.glob("sat_*.npz"))
+    if not files:
+        return None
+    f = files[-1]
+    st = datetime.strptime(f.stem[4:], "%Y%m%dT%H%M").replace(tzinfo=timezone.utc)
+    if (now_utc - st).total_seconds() / 60.0 > SAT_MAX_AGE_MIN:
+        return None
+    z = np.load(f)
+    shape = tuple(int(v) for v in z["shape"])
+    cold = np.unpackbits(z["cold"])[: shape[0] * shape[1]].reshape(shape).astype(bool)
+    la0, lo0, la1, lo1 = (float(v) for v in z["bbox"])
+    step = float(z["step"])
+    rows = np.floor((la1 - lat2d) / step).astype(int)
+    cols = np.floor((lon2d - lo0) / step).astype(int)
+    inside = (rows >= 0) & (rows < shape[0]) & (cols >= 0) & (cols < shape[1])
+    m = cold[rows.clip(0, shape[0] - 1), cols.clip(0, shape[1] - 1)] & inside
+    k = 2 * max(1, int(round(km / (BOT_GRID_STEP_DEG * 111.0)))) + 1
+    return ndimage.maximum_filter(m.astype(np.uint8), size=k) > 0
 
 
 def _satellite_radar_check(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime, state: dict) -> dict:
@@ -4829,7 +4860,8 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
             elif share >= AGREE_OK_SHARE and me in state and state[me].get("by") != "satellite":
                 print(f"[bot-export] radar check: {me} agrees again ({share:.0%}) -- trusted")
                 state.pop(me, None)
-    held = {}
+    held, kept = {}, {}
+    cold_near = None
     fams = {me: fam for me, _, fam in AGREE_PAIRS}
     for me in list(state):
         st = state.get(me)
@@ -4839,22 +4871,43 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
             state.pop(me, None)
             continue
         fam = fams.get(me, ())
+        if cold_near is None:
+            try:
+                cold_near = _satellite_cold_near(lat2d, lon2d, now_utc, SAT_FALLBACK_KM)
+            except Exception as ex:
+                print(f"[bot-export] satellite fallback unavailable ({ex!r})")
+                cold_near = False
         for p in list(regridded):
             if p in fam or PRODUCT_RADAR.get(p) == me:
                 g = regridded[p]
-                cut = np.isfinite(g) & (g > BOT_SRI_NO_RAIN_DBZ)
+                echo = np.isfinite(g) & (g > BOT_SRI_NO_RAIN_DBZ)
+                keep = np.zeros(g.shape, dtype=bool)
+                if isinstance(cold_near, np.ndarray):
+                    keep = echo & cold_near
+                    lab, n = ndimage.label(keep, structure=np.ones((3, 3)))
+                    if n:
+                        sizes = ndimage.sum(keep, lab, index=np.arange(1, n + 1))
+                        keep &= np.isin(lab, np.arange(1, n + 1)[sizes >= SAT_FALLBACK_MIN_NODES])
+                cut = echo & ~keep
                 if cut.any():
-                    regridded[p] = np.where(cut, BOT_SRI_NO_RAIN_DBZ, g)
+                    _map_holds.setdefault("blank_next", {})[p] = cut
+                if cut.any() or keep.any():
+                    g = np.where(cut, BOT_SRI_NO_RAIN_DBZ, g)
+                    g = np.where(keep & (g > BOT_SRI_CAP_DBZ), BOT_SRI_CAP_DBZ, g)
+                    regridded[p] = g
                     held[p] = int(cut.sum())
+                    if keep.any():
+                        kept[p] = int(keep.sum())
         print(f"[bot-export] radar check: {me} NOT trusted until {st['distrust_until']} ({st['reason']}) -- "
-              f"held below alert strength: {held}")
+              f"held below alert strength: {held}; kept under satellite cloud tops (max Moderate): {kept}")
     try:
         AGREE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         AGREE_STATE_FILE.write_text(json.dumps(state))
     except Exception as ex:
         print(f"[bot-export] radar check state not saved ({ex!r})")
     return {"checks": verdict, "satellite": sat,
-            "distrusted": {k: v["distrust_until"] for k, v in state.items()}, "held": held}
+            "distrusted": {k: v["distrust_until"] for k, v in state.items()}, "held": held,
+            "kept_under_cloud": kept}
 
 
 def _ghats_night_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime) -> dict:
@@ -5084,6 +5137,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
                       f"{BOT_LONG_RANGE_MIN_CORE_DBZ:.0f} dBZ core dropped ({int(drop.sum())} nodes)")
 
     _orig_for_map = {p: g.copy() for p, g in regridded.items()}
+    _map_holds["blank_next"] = {}
     agree_summary = {}
     if regridded:
         try:
@@ -5112,6 +5166,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             if lowered.any():
                 _map_holds["caps"][p] = np.where(lowered, g, np.nan)
         _map_holds["lats"], _map_holds["lons"] = lats, lons
+        _map_holds["blank"] = _map_holds.pop("blank_next", {})
         _map_holds["distrusted"] = {
             k: v for k, v in (agree_summary.get("distrusted") or {}).items()}
         try:
