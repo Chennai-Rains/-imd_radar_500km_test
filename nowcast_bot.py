@@ -4880,7 +4880,7 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
         for p in list(regridded):
             if p in fam or PRODUCT_RADAR.get(p) == me:
                 g = regridded[p]
-                echo = np.isfinite(g) & (g > BOT_SRI_NO_RAIN_DBZ)
+                echo = np.isfinite(g) & (g > 0)          # all of its echo, weak included (the yellow swathe)
                 keep = np.zeros(g.shape, dtype=bool)
                 if isinstance(cold_near, np.ndarray):
                     keep = echo & cold_near
@@ -4892,7 +4892,10 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
                 if cut.any():
                     _map_holds.setdefault("blank_next", {})[p] = cut
                 if cut.any() or keep.any():
-                    g = np.where(cut, BOT_SRI_NO_RAIN_DBZ, g)
+                    # 13 Nov 6:01 AM: holding the junk at 34 dBZ still painted it as a yellow swathe in the alert
+                    # picture (and told the bots "light rain"). An untrusted radar's unbacked echo now counts as NOT
+                    # SEEN (NaN): other radars' echo there still counts through the composite.
+                    g = np.where(cut, np.nan, g)
                     g = np.where(keep & (g > BOT_SRI_CAP_DBZ), BOT_SRI_CAP_DBZ, g)
                     regridded[p] = g
                     held[p] = int(cut.sum())
@@ -4963,7 +4966,8 @@ def _ghats_night_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now
         if hold_it:
             hm = m & zone
             for p, g in list(regridded.items()):
-                regridded[p] = np.where(hm & np.isfinite(g) & (g > BOT_SRI_NO_RAIN_DBZ), BOT_SRI_NO_RAIN_DBZ, g)
+                # night Ghats echo is not rain (gauges dry): removed, not just held at 34 (no yellow swathe)
+                regridded[p] = np.where(hm & np.isfinite(g) & (g > BOT_SRI_NO_RAIN_DBZ), -1.0, g)
             held_nodes += int(hm.sum())
             held_names.append(f"{clat:.2f}N {clon:.2f}E ({int(m.sum())} nodes, born {born} IST)")
     try:
@@ -5162,9 +5166,13 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             o = _orig_for_map.get(p)
             if o is None:
                 continue
-            lowered = np.isfinite(o) & np.isfinite(g) & (g < o - 0.01)
+            lowered = np.isfinite(o) & np.isfinite(g) & (g < o - 0.01) & (g >= 0)
             if lowered.any():
                 _map_holds["caps"][p] = np.where(lowered, g, np.nan)
+            removed = np.isfinite(o) & (o > 0) & (~np.isfinite(g) | (g < 0))
+            if removed.any():
+                b = _map_holds.setdefault("blank_next", {})
+                b[p] = removed | b.get(p, np.zeros(removed.shape, dtype=bool))
         _map_holds["lats"], _map_holds["lons"] = lats, lons
         _map_holds["blank"] = _map_holds.pop("blank_next", {})
         _map_holds["distrusted"] = {
