@@ -49,23 +49,90 @@
   "cni_ppi": [],
   "mlr_maxz": [],
   "tvm_ppi": [],
-  "vsk_maxz": [],
+  "vsk_maxz": [
+    {
+      "id": 1,
+      "product": "vsk_maxz",
+      "centroid_latlon": [
+        19.113895167390922,
+        84.72555527792906
+      ],
+      "max_dbz": 51.5,
+      "pixel_count": 115,
+      "px": 473.69565217391306,
+      "py": 118.48695652173913,
+      "range_km": 209.8,
+      "beam_height_km": 0.0,
+      "elevated": false,
+      "velocity_kmh": [
+        0.2,
+        123.0
+      ],
+      "trend": "unknown",
+      "confirmed_at_surface": false
+    },
+    {
+      "id": 2,
+      "product": "vsk_maxz",
+      "centroid_latlon": [
+        18.929491934722865,
+        83.34953071685348
+      ],
+      "max_dbz": 51.5,
+      "pixel_count": 67,
+      "px": 299.05970149253733,
+      "py": 143.0597014925373,
+      "range_km": 131.4,
+      "beam_height_km": 0.0,
+      "elevated": false,
+      "velocity_kmh": [
+        0.0,
+        127.0
+      ],
+      "trend": "unknown",
+      "confirmed_at_surface": false
+    },
+    {
+      "id": 3,
+      "product": "vsk_maxz",
+      "centroid_latlon": [
+        16.68958080851126,
+        82.27352372875215
+      ],
+      "max_dbz": 60.0,
+      "pixel_count": 224,
+      "px": 162.5,
+      "py": 441.54017857142856,
+      "range_km": 164.3,
+      "beam_height_km": 0.0,
+      "elevated": false,
+      "velocity_kmh": [
+        0.2,
+        25.0
+      ],
+      "trend": "unknown",
+      "confirmed_at_surface": false
+    }
+  ],
   "vsk_ppi": [
     {
       "id": 1,
       "product": "vsk_ppi",
       "centroid_latlon": [
-        18.92712292476208,
-        83.36170738111434
+        18.927688524511076,
+        83.36120272198471
       ],
-      "max_dbz": 55.1,
-      "pixel_count": 161,
-      "px": 300.8447204968944,
-      "py": 37.2111801242236,
-      "range_km": 131.1,
+      "max_dbz": 54.2,
+      "pixel_count": 164,
+      "px": 300.7378048780488,
+      "py": 37.08536585365854,
+      "range_km": 131.2,
       "beam_height_km": 1.52,
       "elevated": true,
-      "velocity_kmh": null,
+      "velocity_kmh": [
+        0.1,
+        322.0
+      ],
       "trend": "steady",
       "confirmed_at_surface": false
     }
@@ -75,62 +142,35 @@
       "id": 1,
       "product": "mpt_maxz",
       "centroid_latlon": [
-        16.64964188466711,
-        82.99285052642004
+        16.62054480850759,
+        82.27398732801319
       ],
-      "max_dbz": 39.0,
-      "pixel_count": 63,
-      "px": 579.3809523809524,
-      "py": 256.14285714285717,
-      "range_km": 203.6,
-      "beam_height_km": 0.0,
-      "elevated": false,
-      "velocity_kmh": [
-        3.7,
-        193.0
-      ],
-      "trend": "unknown",
-      "confirmed_at_surface": false
-    },
-    {
-      "id": 3,
-      "product": "mpt_maxz",
-      "centroid_latlon": [
-        16.618539217723885,
-        82.27477841114019
-      ],
-      "max_dbz": 59.8,
-      "pixel_count": 68,
-      "px": 479.8382352941176,
-      "py": 260.63235294117646,
+      "max_dbz": 57.4,
+      "pixel_count": 70,
+      "px": 479.72857142857146,
+      "py": 260.34285714285716,
       "range_km": 129.7,
       "beam_height_km": 0.0,
       "elevated": false,
-      "velocity_kmh": [
-        0.1,
-        100.0
-      ],
+      "velocity_kmh": null,
       "trend": "steady",
       "confirmed_at_surface": false
     },
     {
-      "id": 4,
+      "id": 2,
       "product": "mpt_maxz",
       "centroid_latlon": [
-        16.18340752207506,
-        81.14498440505957
+        16.184469549300985,
+        81.14667210417238
       ],
-      "max_dbz": 39.0,
-      "pixel_count": 68,
-      "px": 323.22058823529414,
-      "py": 323.44117647058823,
+      "max_dbz": 39.4,
+      "pixel_count": 66,
+      "px": 323.45454545454544,
+      "py": 323.2878787878788,
       "range_km": 0.2,
       "beam_height_km": 0.0,
       "elevated": false,
-      "velocity_kmh": [
-        1.4,
-        275.0
-      ],
+      "velocity_kmh": null,
       "trend": "steady",
       "confirmed_at_surface": false
     }
