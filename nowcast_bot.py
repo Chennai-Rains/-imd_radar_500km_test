@@ -4913,6 +4913,60 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
             "kept_under_cloud": kept}
 
 
+# ---- echo that appears out of nothing must be seen twice ----
+# 14 Nov 2026, 11:48 AM IST (Srikanth: "This looks suspect"): Trivandrum PPI showed a thin 54 dBZ line (about 3 km
+# wide, 28 km long) exactly along the Western Ghats crest above Tirunelveli, with nothing at all in the frame before
+# (11:33 AM) -- and that single frame drove a "Tirunelveli Moderate" alert. Over 4-13 Nov not one Karaikal storm of
+# >= 20 nodes at >= 40 dBZ appeared without some echo (>= 25 dBZ) within 15 km in the previous frame: real storms grow
+# through weaker echo first. So a strong patch with nothing before it is held (not seen) until the radar's NEXT frame
+# shows it again -- by then the previous frame has echo there and it passes.
+NEW_ECHO_DBZ: float = 40.0
+NEW_ECHO_MIN_NODES: int = 5
+NEW_ECHO_PREV_DBZ: float = 25.0
+NEW_ECHO_NEAR_KM: float = 15.0
+NEW_ECHO_MAX_GAP_MIN: float = 35.0
+
+
+def _new_echo_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray) -> dict:
+    held = {}
+    k = 2 * max(1, int(round(NEW_ECHO_NEAR_KM / (BOT_GRID_STEP_DEG * 111.0)))) + 1
+    for p, g in list(regridded.items()):
+        cur_t = _last_obs_time_seen.get(p)
+        if cur_t is None:
+            continue
+        prev = None
+        for f in ARCHIVE_DIR.glob(f"{p}_*.gif"):
+            m = re.search(r"(\d{8}T\d{6})Z", f.name)
+            if not m:
+                continue
+            t = datetime.strptime(m.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+            if t < cur_t - timedelta(seconds=30) and (prev is None or t > prev[0]):
+                prev = (t, f)
+        if prev is None or (cur_t - prev[0]).total_seconds() / 60.0 > NEW_ECHO_MAX_GAP_MIN:
+            continue
+        try:
+            img = Image.open(prev[1])
+            pg = _bot_regrid_dbz(decode_reflectivity(img, p, build_lut_from_colorbar(img, p)), p, lat2d, lon2d)
+        except Exception as ex:
+            print(f"[bot-export] new-echo check: {p} previous frame unreadable ({ex!r})")
+            continue
+        before = ndimage.maximum_filter((np.nan_to_num(pg, nan=0.0) >= NEW_ECHO_PREV_DBZ).astype(np.uint8), size=k) > 0
+        echo = np.isfinite(g) & (g > 0)
+        lab, n = ndimage.label(echo, structure=np.ones((3, 3)))
+        if not n:
+            continue
+        strong_n = ndimage.sum(np.isfinite(g) & (g >= NEW_ECHO_DBZ), lab, index=np.arange(1, n + 1))
+        seen_before = ndimage.maximum(before.astype(np.uint8), lab, index=np.arange(1, n + 1))
+        new_ids = np.arange(1, n + 1)[(strong_n >= NEW_ECHO_MIN_NODES) & (seen_before == 0)]
+        if len(new_ids):
+            cut = np.isin(lab, new_ids)
+            regridded[p] = np.where(cut, np.nan, g)
+            held[p] = int(cut.sum())
+            print(f"[bot-export] new-echo check: {p} -- {len(new_ids)} strong patch(es), {int(cut.sum())} nodes, with "
+                  f"nothing >= {NEW_ECHO_PREV_DBZ:.0f} dBZ there in its {prev[0]:%H:%M}Z frame: held until seen again")
+    return held
+
+
 def _ghats_night_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime) -> dict:
     """Track >= 35 dBZ echoes cycle to cycle; at night hold those born inside the Ghats boxes. Returns a summary."""
     ist = now_utc + timedelta(hours=5, minutes=30)
@@ -5142,6 +5196,12 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
 
     _orig_for_map = {p: g.copy() for p, g in regridded.items()}
     _map_holds["blank_next"] = {}
+    new_echo_held = {}
+    if regridded:
+        try:
+            new_echo_held = _new_echo_hold(regridded, lat2d, lon2d)
+        except Exception as ex:
+            print(f"[bot-export] new-echo check skipped ({ex!r})")
     agree_summary = {}
     if regridded:
         try:
@@ -5157,6 +5217,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     sri_summary = _bot_sri_cap(regridded, age_h, lat2d, lon2d, now_utc) if regridded else {}
     sri_summary["ghats_night"] = ghats_summary
     sri_summary["radar_agreement"] = agree_summary
+    sri_summary["new_echo_held"] = new_echo_held
     # 13 Nov 2026 (Srikanth: "update the live map as well with the same conditions we are following for the alerts"):
     # hand the map what the checks above changed -- per product, the strength each held node was capped at -- and
     # which radars are not trusted right now. build_forecast_map (run after this) draws with them.
