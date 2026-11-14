@@ -537,6 +537,7 @@ PRODUCTS = {
         "weak_speckle_gate": {"to_km": 130.0, "max_dbz": 25.0, "core_min_px": 10, "near_px": 5,
                               "fill_win": 9, "fill_min": 0.8},   # 3 Nov 2026, see decode_reflectivity
         "min_swatch_rows": 2,
+        "lut_exclude_colors": [(204, 204, 153)],   # 14 Nov 2026: hill-shading khaki, see build_lut_from_colorbar
         "role": "aloft_early_warning",
         "range_km": 250.0,         # printed directly in the frame's own metadata panel ("Range: 250 km")
         "elevation_deg": None,     # column-max, not a single tilt -- same as every other MAXZ product here
@@ -647,6 +648,7 @@ PRODUCTS = {
     "cni_ppi": {
         "url": "https://mausam.imd.gov.in/Radar/ppi_cni.gif",
         "min_swatch_rows": 2,
+        "lut_exclude_colors": [(204, 204, 153)],   # 14 Nov 2026: hill-shading khaki, see build_lut_from_colorbar
         "role": "aloft_early_warning",
         "range_km": 150.0,
         # 98 km (was 135, 19 Oct 2026): beyond 100 km the land is the Eastern Ghats hill shading (Tirupati, Chittoor,
@@ -1604,6 +1606,15 @@ def build_lut_from_colorbar(img: Image.Image, product: str) -> list[tuple[tuple[
         kept = [(c, v) for c, v in lut if cnt[c] >= min_rows]
         if kept:
             lut = kept
+    excl = cfg.get("lut_exclude_colors")
+    if excl:
+        # 14 Nov 2026, 7:07 PM IST false alert (Vellore / Ranipet / Tiruvannamalai / Tiruvallur, all exactly 39 dBZ):
+        # the Selex frames' colour bar is itself dithered, and in the 13:20Z Chennai MAXZ frame two rows of the
+        # 37.5-40 dBZ band came out as (204, 204, 153) -- the khaki of the hill shading west of Chennai. With it in the
+        # LUT (min_swatch_rows = 2 let it through) every hill pixel decoded as a 39 dBZ storm. Same failure as
+        # 7 Oct 01:51 IST. These basemap colours are never reflectivity colours: never let them into the LUT.
+        bad = {tuple(c) for c in excl}
+        lut = [(c, v) for c, v in lut if c not in bad]
     return lut
 
 
@@ -4792,8 +4803,7 @@ def _satellite_radar_check(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: dateti
         if best is None:
             continue
         try:
-            img = Image.open(best[1])
-            dbz = decode_reflectivity(img, prod, build_lut_from_colorbar(img, prod))
+            dbz = _decode_own_lut(Image.open(best[1]), prod)
             grid = _bot_regrid_dbz(dbz, prod, lat2d, lon2d)
         except Exception as ex:
             print(f"[bot-export] satellite check: {prod} frame unreadable ({ex!r})")
@@ -4920,11 +4930,25 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
 # >= 20 nodes at >= 40 dBZ appeared without some echo (>= 25 dBZ) within 15 km in the previous frame: real storms grow
 # through weaker echo first. So a strong patch with nothing before it is held (not seen) until the radar's NEXT frame
 # shows it again -- by then the previous frame has echo there and it passes.
-NEW_ECHO_DBZ: float = 40.0
+NEW_ECHO_DBZ: float = 35.0     # 14 Nov 7:07 PM: the Chennai colour-bar junk was all 39 dBZ
 NEW_ECHO_MIN_NODES: int = 5
 NEW_ECHO_PREV_DBZ: float = 25.0
 NEW_ECHO_NEAR_KM: float = 15.0
 NEW_ECHO_MAX_GAP_MIN: float = 35.0
+
+
+def _decode_own_lut(img: Image.Image, product: str) -> np.ndarray:
+    """Decode an archived frame with ITS OWN colour bar. decode_reflectivity reuses the colour tree cached from the
+    first frame decoded in this run (get_kdtree), so without this a bad colour bar in the current frame (14 Nov
+    13:20Z) is applied to the previous frame too -- and the junk then looks 'seen before'."""
+    saved = _kdtree_cache.pop(product, None)
+    try:
+        return decode_reflectivity(img, product, build_lut_from_colorbar(img, product))
+    finally:
+        if saved is not None:
+            _kdtree_cache[product] = saved
+        else:
+            _kdtree_cache.pop(product, None)
 
 
 def _new_echo_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray) -> dict:
@@ -4945,8 +4969,7 @@ def _new_echo_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray) -> dic
         if prev is None or (cur_t - prev[0]).total_seconds() / 60.0 > NEW_ECHO_MAX_GAP_MIN:
             continue
         try:
-            img = Image.open(prev[1])
-            pg = _bot_regrid_dbz(decode_reflectivity(img, p, build_lut_from_colorbar(img, p)), p, lat2d, lon2d)
+            pg = _bot_regrid_dbz(_decode_own_lut(Image.open(prev[1]), p), p, lat2d, lon2d)
         except Exception as ex:
             print(f"[bot-export] new-echo check: {p} previous frame unreadable ({ex!r})")
             continue
