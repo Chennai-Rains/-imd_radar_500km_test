@@ -4745,12 +4745,28 @@ SAT_RADAR_PRODUCT: dict = {"karaikal": "kkl_maxz", "chennai": "cni_maxz", "niot"
 # 13 Nov 2026 (Srikanth: "We can add as a fall back"): while a radar is NOT trusted, its echo is still kept where the
 # satellite shows a cold cloud top within SAT_FALLBACK_KM (capped at Moderate, and only in patches of >= 3 nodes).
 # 13 Nov 5:12 AM: kept 41 of 44 nodes of the real showers off Vedaranyam, 64 of 1,440 nodes of the inland junk.
+# 16 Nov 2026, 4:51 AM IST (Srikanth: "we are pushing false alerts based on Karaikal radar"): Karaikal again lit up
+# Thanjavur / Pudukkottai / Ariyalur / Perambalur / Kallakurichi -- gauges dry everywhere except Kanniyakumari. This
+# time under a cloud deck: 81-87% of its strong echo sat under cold tops (so the check above passed), but only 1-21%
+# under satellite RAIN (h63). Chennai's echo the same hour: 100%. Night replay 4-16 Nov, Karaikal echo >= 35 dBZ over
+# land more than 60 km from the radar: real nights 45-100% under satellite rain within 15 km; false nights 0-27%
+# (one hill case 56%, which the Ghats rule handles). So at night that inland echo needs satellite rain: if less than
+# SAT_NIGHT_MIN_RAIN_SHARE of it has any, Karaikal is not trusted inland -- echo is kept only where satellite rain is
+# within SAT_FALLBACK_KM, or within SAT_NIGHT_NEAR_KM of the radar, or over the sea (real coastal showers are often
+# too warm-topped for h63: 13 Nov Vedaranyam).
+SAT_NIGHT_IST: tuple = (20, 9)
+SAT_NIGHT_RADARS: dict = {"karaikal": 79.83}     # radar -> longitude of its coast (land is west of it)
+SAT_NIGHT_NEAR_KM: float = 60.0
+SAT_NIGHT_MIN_NODES: int = 20
+SAT_NIGHT_MIN_RAIN_SHARE: float = 0.35
+SAT_NIGHT_OK_RAIN_SHARE: float = 0.6
 SAT_FALLBACK_KM: float = 5.0
 SAT_FALLBACK_MIN_NODES: int = 3
 
 
-def _satellite_cold_near(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime, km: float):
-    """Bot-grid mask: a cold cloud top within `km`, from the newest satellite file (<= SAT_MAX_AGE_MIN). None if none."""
+def _satellite_cold_near(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime, km: float, kind: str = "cold"):
+    """Bot-grid mask: a cold cloud top (kind="cold") or satellite rain (kind="rain") within `km`, from the newest
+    satellite file (<= SAT_MAX_AGE_MIN). None if none."""
     files = sorted(SAT_DIR.glob("sat_*.npz"))
     if not files:
         return None
@@ -4760,7 +4776,7 @@ def _satellite_cold_near(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime
         return None
     z = np.load(f)
     shape = tuple(int(v) for v in z["shape"])
-    cold = np.unpackbits(z["cold"])[: shape[0] * shape[1]].reshape(shape).astype(bool)
+    cold = np.unpackbits(z[kind])[: shape[0] * shape[1]].reshape(shape).astype(bool)
     la0, lo0, la1, lo1 = (float(v) for v in z["bbox"])
     step = float(z["step"])
     rows = np.floor((la1 - lat2d) / step).astype(int)
@@ -4830,6 +4846,51 @@ def _satellite_radar_check(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: dateti
         elif cs >= SAT_OK_COLD_SHARE and state.get(radar, {}).get("by") == "satellite":
             print(f"[bot-export] satellite check: {radar} matches the satellite again ({cs:.0%}) -- trusted")
             state.pop(radar, None)
+    # night: inland echo far from the radar must sit under satellite RAIN
+    ist_h = (now_utc + timedelta(hours=5, minutes=30)).hour
+    n0, n1 = SAT_NIGHT_IST
+    if ist_h >= n0 or ist_h < n1:
+        for radar, coast_lon in SAT_NIGHT_RADARS.items():
+            prod = SAT_RADAR_PRODUCT.get(radar)
+            info = out["radars"].get(radar)
+            if not prod or info is None or "frame" not in info and info.get("nodes", 0) == 0:
+                continue
+            try:
+                frame = None
+                for g in ARCHIVE_DIR.glob(f"{prod}_*.gif"):
+                    m = re.search(r"(\d{8}T\d{6})Z", g.name)
+                    if m:
+                        t = datetime.strptime(m.group(1), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc)
+                        d = abs((t - st).total_seconds()) / 60.0
+                        if d <= SAT_MATCH_MIN and (frame is None or d < frame[0]):
+                            frame = (d, g)
+                if frame is None:
+                    continue
+                grid = _bot_regrid_dbz(_decode_own_lut(Image.open(frame[1]), prod), prod, lat2d, lon2d)
+            except Exception as ex:
+                print(f"[bot-export] night satellite check: {prod} frame unreadable ({ex!r})")
+                continue
+            sd = RADAR_SITES[radar]
+            dist = np.hypot((lat2d - sd["site_lat"]) * 111.0,
+                            (lon2d - sd["site_lon"]) * 111.0 * math.cos(math.radians(sd["site_lat"])))
+            inland = inside & np.isfinite(grid) & (grid >= 35.0) & (dist > SAT_NIGHT_NEAR_KM) & (lon2d < coast_lon)
+            n = int(inland.sum())
+            if n < SAT_NIGHT_MIN_NODES:
+                continue
+            rs = float((inland & rain_near).sum()) / n
+            out["radars"].setdefault(radar, {})["night_inland"] = {"nodes": n, "rain_share": round(rs, 2)}
+            if rs < SAT_NIGHT_MIN_RAIN_SHARE:
+                until = now_utc + timedelta(minutes=AGREE_HOLD_MIN)
+                state[radar] = {"distrust_until": until.isoformat(timespec="seconds"),
+                                "reason": f"night, satellite {st:%H:%M}Z: {n} inland nodes >= 35 dBZ beyond "
+                                          f"{SAT_NIGHT_NEAR_KM:.0f} km, {rs:.0%} under satellite rain",
+                                "since": state.get(radar, {}).get("since", now_utc.isoformat(timespec="seconds")),
+                                "by": "satellite-night", "fallback": "rain",
+                                "near_km": SAT_NIGHT_NEAR_KM, "coast_lon": coast_lon}
+            elif rs >= SAT_NIGHT_OK_RAIN_SHARE and state.get(radar, {}).get("by") == "satellite-night":
+                print(f"[bot-export] night satellite check: {radar} inland echo under satellite rain again "
+                      f"({rs:.0%}) -- trusted")
+                state.pop(radar, None)
     return out
 
 
@@ -4890,13 +4951,28 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
             except Exception as ex:
                 print(f"[bot-export] satellite fallback unavailable ({ex!r})")
                 cold_near = False
+        backing = cold_near
+        free = None
+        if st.get("fallback") == "rain":
+            try:
+                backing = _satellite_cold_near(lat2d, lon2d, now_utc, SAT_FALLBACK_KM, kind="rain")
+            except Exception:
+                backing = None
+            if not isinstance(backing, np.ndarray):
+                backing = np.zeros(lat2d.shape, dtype=bool)
+            sd = RADAR_SITES[me]
+            dist = np.hypot((lat2d - sd["site_lat"]) * 111.0,
+                            (lon2d - sd["site_lon"]) * 111.0 * math.cos(math.radians(sd["site_lat"])))
+            # only the far inland echo is in question: near the radar and over the sea it stands, uncapped
+            free = (dist <= st.get("near_km", SAT_NIGHT_NEAR_KM)) | (lon2d >= st.get("coast_lon", 999.0))
+            backing = backing | free
         for p in list(regridded):
             if p in fam or PRODUCT_RADAR.get(p) == me:
                 g = regridded[p]
                 echo = np.isfinite(g) & (g > 0)          # all of its echo, weak included (the yellow swathe)
                 keep = np.zeros(g.shape, dtype=bool)
-                if isinstance(cold_near, np.ndarray):
-                    keep = echo & cold_near
+                if isinstance(backing, np.ndarray):
+                    keep = echo & backing
                     lab, n = ndimage.label(keep, structure=np.ones((3, 3)))
                     if n:
                         sizes = ndimage.sum(keep, lab, index=np.arange(1, n + 1))
@@ -4909,13 +4985,14 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
                     # picture (and told the bots "light rain"). An untrusted radar's unbacked echo now counts as NOT
                     # SEEN (NaN): other radars' echo there still counts through the composite.
                     g = np.where(cut, np.nan, g)
-                    g = np.where(keep & (g > BOT_SRI_CAP_DBZ), BOT_SRI_CAP_DBZ, g)
+                    capm = keep if free is None else (keep & ~free)
+                    g = np.where(capm & (g > BOT_SRI_CAP_DBZ), BOT_SRI_CAP_DBZ, g)
                     regridded[p] = g
                     held[p] = int(cut.sum())
                     if keep.any():
                         kept[p] = int(keep.sum())
         print(f"[bot-export] radar check: {me} NOT trusted until {st['distrust_until']} ({st['reason']}) -- "
-              f"held below alert strength: {held}; kept under satellite cloud tops (max Moderate): {kept}")
+              f"held below alert strength: {held}; kept (satellite-backed, near the radar or at sea): {kept}")
     try:
         AGREE_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         AGREE_STATE_FILE.write_text(json.dumps(state))
