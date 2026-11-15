@@ -4493,8 +4493,11 @@ GHATS_NIGHT_ZONES: dict = {
     "Shevaroy (Yercaud)": (11.72, 11.92, 78.10, 78.33),
     "Chitteri": (11.88, 12.12, 78.38, 78.56),
 }
-GHATS_NIGHT_IST: tuple = (21, 9)          # 9 PM to 9 AM IST
-GHATS_AFTERNOON_IST: tuple = (12, 20)     # an echo born 12 noon-8 PM is afternoon convection: real
+# 15 Nov 2026: hill echoes born 5:21-5:36 PM (Kolli, Pachamalai, Kalvarayan) alerted Namakkal / Salem / Kallakurichi;
+# no lightning anywhere in the region (ILDN, to 6:17 PM). Srikanth: Karaikal false alert again. The window now starts
+# at 4 PM, and only echoes born noon-4 PM count as afternoon convection.
+GHATS_NIGHT_IST: tuple = (16, 9)          # 4 PM to 9 AM IST (was 9 PM)
+GHATS_AFTERNOON_IST: tuple = (12, 16)     # an echo born 12 noon-4 PM is afternoon convection: real (was to 8 PM)
 GHATS_IN_ZONE_FRACTION: float = 0.5
 GHATS_MATCH_KM: float = 25.0              # same echo as last cycle if its centre is within this
 GHATS_TRACK_MAX_GAP_MIN: float = 30.0
@@ -5030,7 +5033,8 @@ def _ghats_night_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now
         if best:
             born = best[1]["born"]
             from_plains = best[1]["from_plains"] or frac < GHATS_IN_ZONE_FRACTION
-            afternoon = best[1]["afternoon"]
+            bh = int(born.split(":")[0])
+            afternoon = a0 <= bh < a1        # from the birth time, so a change of window applies to running tracks
         else:
             born = ist.strftime("%H:%M")
             from_plains = frac < GHATS_IN_ZONE_FRACTION
