@@ -1,6 +1,28 @@
 {
   "maxz": [],
-  "kkl_maxz": [],
+  "kkl_maxz": [
+    {
+      "id": 2,
+      "product": "kkl_maxz",
+      "centroid_latlon": [
+        9.362027002566872,
+        80.81184703046765
+      ],
+      "max_dbz": 41.4,
+      "pixel_count": 6,
+      "px": 370.0,
+      "py": 442.1666666666667,
+      "range_km": 203.9,
+      "beam_height_km": 0.0,
+      "elevated": false,
+      "velocity_kmh": [
+        0.3,
+        2.0
+      ],
+      "trend": "unknown",
+      "confirmed_at_surface": false
+    }
+  ],
   "kkl_ppz": [
     {
       "id": 1,
@@ -296,10 +318,7 @@
       "range_km": 131.2,
       "beam_height_km": 1.52,
       "elevated": true,
-      "velocity_kmh": [
-        0.0,
-        10.0
-      ],
+      "velocity_kmh": null,
       "trend": "steady",
       "confirmed_at_surface": false
     }
