@@ -4720,7 +4720,7 @@ AGREE_MIN_NODES: int = 30
 AGREE_MIN_SHARE: float = 0.3
 AGREE_OK_SHARE: float = 0.6
 AGREE_NEAR_KM: float = 10.0
-AGREE_MAX_AGE_MIN: float = 20.0
+AGREE_MAX_AGE_MIN: float = 40.0     # 16 Nov 7 AM: Chennai MAXZ was 34 min late and the check skipped (same as BOT_STALE_MINUTES)
 AGREE_HOLD_MIN: float = 60.0
 AGREE_STATE_FILE = Path("state_social_test/radar_agreement.json")
 
