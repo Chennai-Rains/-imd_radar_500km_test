@@ -4787,6 +4787,16 @@ def _satellite_cold_near(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime
     return ndimage.maximum_filter(m.astype(np.uint8), size=k) > 0
 
 
+def _land_mask(lat2d: np.ndarray, lon2d: np.ndarray):
+    """Bot-grid land mask (inside any TN / Puducherry district outline), from social_alerts; None if unavailable."""
+    try:
+        import social_alerts as _sa
+        return _sa.land_mask_grid(lat2d[:, 0], lon2d[0, :])
+    except Exception as ex:
+        print(f"[bot-export] land mask unavailable ({ex!r})")
+        return None
+
+
 def _satellite_radar_check(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime, state: dict) -> dict:
     files = sorted(SAT_DIR.glob("sat_*.npz"))
     if not files:
@@ -4873,7 +4883,10 @@ def _satellite_radar_check(lat2d: np.ndarray, lon2d: np.ndarray, now_utc: dateti
             sd = RADAR_SITES[radar]
             dist = np.hypot((lat2d - sd["site_lat"]) * 111.0,
                             (lon2d - sd["site_lon"]) * 111.0 * math.cos(math.radians(sd["site_lat"])))
-            inland = inside & np.isfinite(grid) & (grid >= 35.0) & (dist > SAT_NIGHT_NEAR_KM) & (lon2d < coast_lon)
+            land = _land_mask(lat2d, lon2d)
+            if land is None:
+                land = lon2d < coast_lon
+            inland = inside & np.isfinite(grid) & (grid >= 35.0) & (dist > SAT_NIGHT_NEAR_KM) & land
             n = int(inland.sum())
             if n < SAT_NIGHT_MIN_NODES:
                 continue
@@ -4928,7 +4941,8 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
             verdict[me] = {"nodes": int(strong.sum()), "share": round(share, 2)}
             if share < AGREE_MIN_SHARE:
                 until = now_utc + timedelta(minutes=AGREE_HOLD_MIN)
-                state[me] = {"distrust_until": until.isoformat(timespec="seconds"),
+                state[me] = {**state.get(me, {}),      # keep a night rule's satellite-rain fallback if one is set
+                             "distrust_until": until.isoformat(timespec="seconds"),
                              "reason": f"{int(strong.sum())} nodes >= 40 dBZ, other radar agrees on {share:.0%}",
                              "since": state.get(me, {}).get("since", now_utc.isoformat(timespec="seconds"))}
             elif share >= AGREE_OK_SHARE and me in state and state[me].get("by") != "satellite":
@@ -4964,8 +4978,30 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
             dist = np.hypot((lat2d - sd["site_lat"]) * 111.0,
                             (lon2d - sd["site_lon"]) * 111.0 * math.cos(math.radians(sd["site_lat"])))
             # only the far inland echo is in question: near the radar and over the sea it stands, uncapped
-            free = (dist <= st.get("near_km", SAT_NIGHT_NEAR_KM)) | (lon2d >= st.get("coast_lon", 999.0))
+            land = _land_mask(lat2d, lon2d)
+            if land is None:
+                land = lon2d < st.get("coast_lon", 999.0)
+            free = (dist <= st.get("near_km", SAT_NIGHT_NEAR_KM)) | ~land
             backing = backing | free
+        # 16 Nov 6:51 AM: never keep an untrusted radar's echo where another radar that we DO trust looks and sees
+        # nothing (Karaikal "rain" over Puducherry / Marakkanam that Chennai MAXZ, covering it fully, showed as dry).
+        contradicted = np.zeros(lat2d.shape, dtype=bool)
+        size_c = 2 * max(1, int(round(AGREE_NEAR_KM / (BOT_GRID_STEP_DEG * 111.0)))) + 1
+        for q, h in regridded.items():
+            rq = PRODUCT_RADAR.get(q)
+            if rq == me or rq in state:
+                continue
+            covered = np.isfinite(h)
+            sq = RADAR_SITES.get(rq, {})
+            if "site_lat" in sq:     # only where that radar is close enough to see shallow rain
+                covered &= np.hypot((lat2d - sq["site_lat"]) * 111.0,
+                                    (lon2d - sq["site_lon"]) * 111.0 * math.cos(math.radians(sq["site_lat"]))) <= 180.0
+            wet = ndimage.maximum_filter((np.nan_to_num(h, nan=0.0) >= 25.0).astype(np.uint8), size=size_c) > 0
+            contradicted |= covered & ~wet
+        if isinstance(backing, np.ndarray):
+            backing = backing & ~contradicted
+            if free is not None:
+                free = free & ~contradicted
         for p in list(regridded):
             if p in fam or PRODUCT_RADAR.get(p) == me:
                 g = regridded[p]
