@@ -4760,6 +4760,11 @@ SAT_NIGHT_NEAR_KM: float = 60.0
 SAT_NIGHT_MIN_NODES: int = 20
 SAT_NIGHT_MIN_RAIN_SHARE: float = 0.35
 SAT_NIGHT_OK_RAIN_SHARE: float = 0.6
+# 16 Nov 2026, 8:16 AM IST: Karaikal was NOT trusted (Chennai agreed with 0% of its strong echo) and yet 2,927 of its
+# nodes were "kept under satellite cloud tops" -- under a cloud deck the fallback keeps nearly everything -- and went
+# out as Moderate for nine districts. The fallback is switched off: a radar that is not trusted contributes nothing
+# until it is trusted again. (Other radars' echo in the same place still counts.)
+SAT_FALLBACK_ENABLED: bool = False
 SAT_FALLBACK_KM: float = 5.0
 SAT_FALLBACK_MIN_NODES: int = 3
 
@@ -5002,6 +5007,8 @@ def _radar_agreement_hold(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d
             backing = backing & ~contradicted
             if free is not None:
                 free = free & ~contradicted
+        if not SAT_FALLBACK_ENABLED:
+            backing = None
         for p in list(regridded):
             if p in fam or PRODUCT_RADAR.get(p) == me:
                 g = regridded[p]
