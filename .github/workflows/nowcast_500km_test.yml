@@ -58,24 +58,39 @@ jobs:
       # package mirror ("Temporary failure resolving azure.archive.ubuntu.com"), apt hung ~8 min, and the run died
       # before making a map. The .deb files are now kept in the Actions cache and installed straight from it, so a
       # mirror outage no longer matters; apt (with short timeouts) is only the fallback when the cache is empty/stale.
+      # 19 Nov 2026: from 5:31 AM IST every run failed here. ubuntu-latest moved to Ubuntu 26.04; the cached .deb
+      # files were built for 24.04 (need libicu74), dpkg left tesseract half-installed, and apt then refused to
+      # install anything. The cache key now includes the Ubuntu release, and a failed cached install is cleaned up
+      # before falling back to apt.
+      - name: Ubuntu release for the package cache key
+        id: osrel
+        run: echo "rel=$(. /etc/os-release && echo $VERSION_ID)" >> "$GITHUB_OUTPUT"
+
       - name: Restore cached Tesseract packages
         id: tess_cache
         uses: actions/cache@v4
         with:
           path: ~/tess-debs
-          key: tesseract-debs-${{ runner.os }}-${{ runner.arch }}-v1
+          key: tesseract-debs-${{ runner.os }}-${{ runner.arch }}-ubuntu${{ steps.osrel.outputs.rel }}-v2
 
       - name: Install Tesseract OCR (system package -- pytesseract just wraps this binary)
         timeout-minutes: 5
         run: |
-          if ls ~/tess-debs/*.deb >/dev/null 2>&1 && sudo dpkg -i ~/tess-debs/*.deb >/dev/null && tesseract --version >/dev/null 2>&1; then
+          if command -v tesseract >/dev/null 2>&1; then
+            echo "Tesseract already on the runner"; exit 0
+          fi
+          if ls ~/tess-debs/*.deb >/dev/null 2>&1 && sudo dpkg -i ~/tess-debs/*.deb >/dev/null 2>&1 && tesseract --version >/dev/null 2>&1; then
             echo "Tesseract installed from the cached packages"; exit 0
           fi
           echo "No usable cached packages -- installing from the Ubuntu mirror"
+          # undo a half-done dpkg install so apt is not left with broken dependencies
+          sudo dpkg --remove --force-depends tesseract-ocr tesseract-ocr-eng tesseract-ocr-osd libtesseract5 libleptonica6 >/dev/null 2>&1 || true
+          sudo apt-get -f install -y -qq >/dev/null 2>&1 || true
           APT="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
           sudo apt-get $APT update -qq || true
           sudo rm -f /var/cache/apt/archives/*.deb
           sudo apt-get $APT install -y tesseract-ocr
+          tesseract --version | head -1
           rm -rf ~/tess-debs && mkdir -p ~/tess-debs && cp /var/cache/apt/archives/*.deb ~/tess-debs/
           ls ~/tess-debs
 
