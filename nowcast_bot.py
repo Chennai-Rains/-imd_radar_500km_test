@@ -5113,6 +5113,53 @@ def _new_echo_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray) -> dic
     return held
 
 
+# ---- night: Karaikal's far inland echo stands only where the satellite sees rain ----
+# 19-20 Nov 2026 (Srikanth: "All of these are false alerts"): 10:36 PM Ariyalur / Perambalur / Cuddalore / Thanjavur
+# and 4:56 AM Dindigul, all Karaikal echo over land beyond 60 km. The whole-radar night check (SAT_NIGHT_*) never
+# fired: when the alert went out the newest satellite picture (30-45 min old) still had fewer than 20 such nodes, and
+# small cells never reach 20. So the test is now made point by point: at night, a Karaikal node over land beyond
+# 60 km is kept only if H-SAF h63 satellite rain lies within KKL_NIGHT_RAIN_KM. Replay 4-13 Nov with the live 35-min
+# lag: real nights keep 387 of 464 such nodes (83%), false nights 737 of 17,778 (4%). Last night: 0% under rain.
+# No fresh satellite file -> the far inland echo is held too (logged).
+KKL_NIGHT_RAIN_KM: float = 25.0
+KKL_NIGHT_PRODUCTS: tuple = ("kkl_maxz", "kkl_ppz")
+
+
+def _kkl_night_rain_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime) -> dict:
+    ist_h = (now_utc + timedelta(hours=5, minutes=30)).hour
+    n0, n1 = SAT_NIGHT_IST
+    if not (ist_h >= n0 or ist_h < n1):
+        return {}
+    land = _land_mask(lat2d, lon2d)
+    if land is None:
+        land = lon2d < SAT_NIGHT_RADARS["karaikal"]
+    sd = RADAR_SITES["karaikal"]
+    dist = np.hypot((lat2d - sd["site_lat"]) * 111.0,
+                    (lon2d - sd["site_lon"]) * 111.0 * math.cos(math.radians(sd["site_lat"])))
+    far = land & (dist > SAT_NIGHT_NEAR_KM)
+    try:
+        rain = _satellite_cold_near(lat2d, lon2d, now_utc, KKL_NIGHT_RAIN_KM, kind="rain")
+    except Exception as ex:
+        print(f"[bot-export] night Karaikal check: satellite unreadable ({ex!r})")
+        rain = None
+    if not isinstance(rain, np.ndarray):
+        print("[bot-export] night Karaikal check: no fresh satellite picture -- far inland Karaikal echo held")
+        rain = np.zeros(lat2d.shape, dtype=bool)
+    held = {}
+    for p in KKL_NIGHT_PRODUCTS:
+        g = regridded.get(p)
+        if g is None:
+            continue
+        cut = far & np.isfinite(g) & (g > 0) & ~rain
+        if cut.any():
+            regridded[p] = np.where(cut, np.nan, g)
+            held[p] = int(cut.sum())
+    if held:
+        print(f"[bot-export] night Karaikal check: far inland echo with no satellite rain within "
+              f"{KKL_NIGHT_RAIN_KM:.0f} km removed: {held}")
+    return held
+
+
 def _ghats_night_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime) -> dict:
     """Track >= 35 dBZ echoes cycle to cycle; at night hold those born inside the Ghats boxes. Returns a summary."""
     ist = now_utc + timedelta(hours=5, minutes=30)
@@ -5355,6 +5402,12 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             agree_summary = _radar_agreement_hold(regridded, age_h, lat2d, lon2d, now_utc)
         except Exception as ex:
             print(f"[bot-export] radar agreement check skipped ({ex!r})")
+    kkl_night_held = {}
+    if regridded:
+        try:
+            kkl_night_held = _kkl_night_rain_hold(regridded, lat2d, lon2d, now_utc)
+        except Exception as ex:
+            print(f"[bot-export] night Karaikal check skipped ({ex!r})")
     ghats_summary = {}
     if regridded:
         try:
@@ -5365,6 +5418,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     sri_summary["ghats_night"] = ghats_summary
     sri_summary["radar_agreement"] = agree_summary
     sri_summary["new_echo_held"] = new_echo_held
+    sri_summary["kkl_night_rain_held"] = kkl_night_held
     # 13 Nov 2026 (Srikanth: "update the live map as well with the same conditions we are following for the alerts"):
     # hand the map what the checks above changed -- per product, the strength each held node was capped at -- and
     # which radars are not trusted right now. build_forecast_map (run after this) draws with them.
