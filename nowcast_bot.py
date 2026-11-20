@@ -5126,10 +5126,12 @@ KKL_NIGHT_PRODUCTS: tuple = ("kkl_maxz", "kkl_ppz")
 
 
 def _kkl_night_rain_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime) -> dict:
+    # 20 Nov 2026, 9:16 AM: Karur Moderate, Karaikal alone at ~200 km, 16 min after the night window closed; no cloud
+    # at all within 25 km on the satellite. By day the test is "cold cloud top OR satellite rain within 25 km" (real
+    # convection: replay 4-9 Nov daytime kept 3,238 of 3,300 such nodes, 98%); no fresh satellite by day -> no hold.
     ist_h = (now_utc + timedelta(hours=5, minutes=30)).hour
     n0, n1 = SAT_NIGHT_IST
-    if not (ist_h >= n0 or ist_h < n1):
-        return {}
+    night = ist_h >= n0 or ist_h < n1
     land = _land_mask(lat2d, lon2d)
     if land is None:
         land = lon2d < SAT_NIGHT_RADARS["karaikal"]
@@ -5139,10 +5141,16 @@ def _kkl_night_rain_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, 
     far = land & (dist > SAT_NIGHT_NEAR_KM)
     try:
         rain = _satellite_cold_near(lat2d, lon2d, now_utc, KKL_NIGHT_RAIN_KM, kind="rain")
+        if not night and isinstance(rain, np.ndarray):
+            cold = _satellite_cold_near(lat2d, lon2d, now_utc, KKL_NIGHT_RAIN_KM, kind="cold")
+            if isinstance(cold, np.ndarray):
+                rain = rain | cold
     except Exception as ex:
-        print(f"[bot-export] night Karaikal check: satellite unreadable ({ex!r})")
+        print(f"[bot-export] Karaikal far-inland check: satellite unreadable ({ex!r})")
         rain = None
     if not isinstance(rain, np.ndarray):
+        if not night:
+            return {}
         print("[bot-export] night Karaikal check: no fresh satellite picture -- far inland Karaikal echo held")
         rain = np.zeros(lat2d.shape, dtype=bool)
     held = {}
@@ -5155,8 +5163,8 @@ def _kkl_night_rain_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, 
             regridded[p] = np.where(cut, np.nan, g)
             held[p] = int(cut.sum())
     if held:
-        print(f"[bot-export] night Karaikal check: far inland echo with no satellite rain within "
-              f"{KKL_NIGHT_RAIN_KM:.0f} km removed: {held}")
+        print(f"[bot-export] {'night' if night else 'day'} Karaikal check: far inland echo with no satellite "
+              f"{'rain' if night else 'cloud top or rain'} within {KKL_NIGHT_RAIN_KM:.0f} km removed: {held}")
     return held
 
 
