@@ -5074,6 +5074,63 @@ def _decode_own_lut(img: Image.Image, product: str) -> np.ndarray:
             _kdtree_cache.pop(product, None)
 
 
+# ---- the nearer radar decides ----
+# 21 Nov 2026, 1:56 PM IST (Srikanth: "Chennai radar which is just 50 kms away did not show anything but why are we
+# putting a false alert based on Karaikal radar"): Chengalpattu Moderate from a small Karaikal echo off Mahabalipuram
+# at ~200 km; Chennai MAXZ, 55 km away, dry. Too small for the agreement check (needs 30 nodes >= 40 dBZ).
+# Rule: where a trusted radar much closer to a node (within NEAR_RADAR_MAX_KM of it, and at least NEAR_RADAR_MARGIN_KM
+# nearer than the far radar) covers it with a fresh frame and has nothing >= NEAR_RADAR_WET_DBZ within
+# NEAR_RADAR_WET_KM, the far radar's echo there is NOT SEEN. Earlier replay: where Chennai and Karaikal both see real
+# rain they agree 95-100%, so real storms keep their echo.
+NEAR_RADAR_PRODUCTS: tuple = ("cni_maxz", "kkl_maxz", "maxz")   # MAXZ-type: they don't read low like the PPIs
+NEAR_RADAR_MAX_KM: float = 150.0
+NEAR_RADAR_MARGIN_KM: float = 60.0
+NEAR_RADAR_WET_DBZ: float = 25.0
+NEAR_RADAR_WET_KM: float = 10.0
+
+
+def _near_radar_veto(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d: np.ndarray) -> dict:
+    size = 2 * max(1, int(round(NEAR_RADAR_WET_KM / (BOT_GRID_STEP_DEG * 111.0)))) + 1
+
+    def dist(radar):
+        sd = RADAR_SITES.get(radar, {})
+        if "site_lat" not in sd:
+            return None
+        return np.hypot((lat2d - sd["site_lat"]) * 111.0,
+                        (lon2d - sd["site_lon"]) * 111.0 * math.cos(math.radians(sd["site_lat"])))
+
+    judges = []
+    for q in NEAR_RADAR_PRODUCTS:
+        h = regridded.get(q)
+        rq = PRODUCT_RADAR.get(q)
+        if h is None or age_h.get(q, 9) * 60.0 > AGREE_MAX_AGE_MIN:
+            continue
+        dq = dist(rq)
+        if dq is None:
+            continue
+        covered = np.isfinite(h) & (dq <= NEAR_RADAR_MAX_KM)
+        wet = ndimage.maximum_filter((np.nan_to_num(h, nan=0.0) >= NEAR_RADAR_WET_DBZ).astype(np.uint8), size=size) > 0
+        judges.append((rq, dq, covered & ~wet))
+    vetoed = {}
+    for p, g in list(regridded.items()):
+        rp = PRODUCT_RADAR.get(p)
+        dp = dist(rp)
+        if dp is None:
+            continue
+        cut = np.zeros(g.shape, dtype=bool)
+        for rq, dq, dry in judges:
+            if rq == rp:
+                continue
+            cut |= dry & (dq + NEAR_RADAR_MARGIN_KM <= dp)
+        cut &= np.isfinite(g) & (g > 0)
+        if cut.any():
+            regridded[p] = np.where(cut, np.nan, g)
+            vetoed[p] = int(cut.sum())
+    if vetoed:
+        print(f"[bot-export] nearer radar sees nothing there -- far echo removed: {vetoed}")
+    return vetoed
+
+
 def _new_echo_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray) -> dict:
     held = {}
     k = 2 * max(1, int(round(NEW_ECHO_NEAR_KM / (BOT_GRID_STEP_DEG * 111.0)))) + 1
@@ -5410,6 +5467,12 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
             agree_summary = _radar_agreement_hold(regridded, age_h, lat2d, lon2d, now_utc)
         except Exception as ex:
             print(f"[bot-export] radar agreement check skipped ({ex!r})")
+    near_vetoed = {}
+    if regridded:
+        try:
+            near_vetoed = _near_radar_veto(regridded, age_h, lat2d, lon2d)
+        except Exception as ex:
+            print(f"[bot-export] nearer-radar check skipped ({ex!r})")
     kkl_night_held = {}
     if regridded:
         try:
@@ -5427,6 +5490,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     sri_summary["radar_agreement"] = agree_summary
     sri_summary["new_echo_held"] = new_echo_held
     sri_summary["kkl_night_rain_held"] = kkl_night_held
+    sri_summary["near_radar_vetoed"] = near_vetoed
     # 13 Nov 2026 (Srikanth: "update the live map as well with the same conditions we are following for the alerts"):
     # hand the map what the checks above changed -- per product, the strength each held node was capped at -- and
     # which radars are not trusted right now. build_forecast_map (run after this) draws with them.
