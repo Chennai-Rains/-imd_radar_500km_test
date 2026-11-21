@@ -5180,6 +5180,11 @@ def _new_echo_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray) -> dic
 # No fresh satellite file -> the far inland echo is held too (logged).
 KKL_NIGHT_RAIN_KM: float = 25.0
 KKL_NIGHT_PRODUCTS: tuple = ("kkl_maxz", "kkl_ppz")
+# 21 Nov 2026, 7:01 PM: Cuddalore / Ariyalur Moderate from Karaikal echo 52-69 km out (Chidambaram-Sirkazhi), no
+# satellite cloud or rain anywhere near it; it sat inside the old 60 km exemption and beyond Chennai's 150 km. The rule
+# now covers all of Karaikal's land echo beyond 15 km. Replay 4-13 Nov, land 15-60 km: day real 257/257 kept, night
+# real 271/313 (87%), night false 140/595 (24%). Sea echo is still exempt (warm-topped coastal showers).
+KKL_SAT_MIN_KM: float = 15.0
 
 
 def _kkl_night_rain_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, now_utc: datetime) -> dict:
@@ -5195,7 +5200,7 @@ def _kkl_night_rain_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray, 
     sd = RADAR_SITES["karaikal"]
     dist = np.hypot((lat2d - sd["site_lat"]) * 111.0,
                     (lon2d - sd["site_lon"]) * 111.0 * math.cos(math.radians(sd["site_lat"])))
-    far = land & (dist > SAT_NIGHT_NEAR_KM)
+    far = land & (dist > KKL_SAT_MIN_KM)
     try:
         rain = _satellite_cold_near(lat2d, lon2d, now_utc, KKL_NIGHT_RAIN_KM, kind="rain")
         if not night and isinstance(rain, np.ndarray):
