@@ -5131,6 +5131,69 @@ def _near_radar_veto(regridded: dict, age_h: dict, lat2d: np.ndarray, lon2d: np.
     return vetoed
 
 
+# ---- audit: every patch of alert-strength echo a check removed or weakened, by district ----
+# 23 Nov 2026 (Srikanth: "tonight we will have the test ... how we can avoid false alerts without missing on real rain
+# bands"): state_social_test/held_log.jsonl gets one line per cycle with each held patch (check, radar product, place,
+# nodes, peak before -> after), so held echo can be checked against TNSDMA gauges the next morning.
+HELD_LOG = Path("state_social_test/held_log.jsonl")
+_district_cache: dict = {}
+
+
+def _district_of(lat2d, lon2d, mask) -> str:
+    key = (lat2d.shape, float(lat2d[0, 0]), float(lon2d[0, 0]))
+    if key not in _district_cache:
+        try:
+            import social_alerts as _sa
+            regs = _sa.build_district_regions(lat2d[:, 0], lon2d[0, :])
+            _district_cache[key] = [(r.name, r.rs, r.cs, r.mask) for r in regs if r.name != "Chennai"]
+        except Exception:
+            _district_cache[key] = []
+    best, bn = "sea / outside TN", 0
+    for name, rs, cs, m in _district_cache[key]:
+        n = int((mask[rs, cs] & m).sum())
+        if n > bn:
+            best, bn = name, n
+    return best
+
+
+def _audit_removed(step: str, before: dict, after: dict, lat2d, lon2d) -> list:
+    rows = []
+    for p, b in before.items():
+        a = after.get(p)
+        if a is None:
+            continue
+        bv = np.nan_to_num(b, nan=0.0)
+        av = np.nan_to_num(a, nan=0.0)
+        hit = (bv >= 35.0) & ((av < 35.0) | ((bv >= 45.0) & (av < 45.0)))
+        if not hit.any():
+            continue
+        lab, n = ndimage.label(hit, structure=np.ones((3, 3)))
+        for k in range(1, n + 1):
+            m = lab == k
+            if m.sum() < 3:
+                continue
+            rows.append({"check": step, "product": p, "district": _district_of(lat2d, lon2d, m),
+                         "lat": round(float(lat2d[m].mean()), 2), "lon": round(float(lon2d[m].mean()), 2),
+                         "nodes": int(m.sum()), "peak": round(float(bv[m].max()), 1),
+                         "after": round(float(av[m].max()), 1)})
+    return rows
+
+
+def _write_audit(now_utc: datetime, rows: list) -> None:
+    HELD_LOG.parent.mkdir(parents=True, exist_ok=True)
+    if HELD_LOG.exists() and HELD_LOG.stat().st_size > 3_000_000:
+        lines = HELD_LOG.read_text().splitlines(keepends=True)
+        HELD_LOG.write_text("".join(lines[len(lines) // 2:]))
+    with open(HELD_LOG, "a") as fh:
+        fh.write(json.dumps({"t": now_utc.isoformat(timespec="seconds"), "held": rows}) + "\n")
+    if rows:
+        by = {}
+        for r in rows:
+            by.setdefault((r["check"], r["district"]), 0)
+            by[(r["check"], r["district"])] += r["nodes"]
+        print("[audit] held: " + "; ".join(f"{d} {n} ({c})" for (c, d), n in sorted(by.items(), key=lambda x: -x[1])[:12]))
+
+
 def _new_echo_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray) -> dict:
     held = {}
     k = 2 * max(1, int(round(NEW_ECHO_NEAR_KM / (BOT_GRID_STEP_DEG * 111.0)))) + 1
@@ -5460,37 +5523,37 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
 
     _orig_for_map = {p: g.copy() for p, g in regridded.items()}
     _map_holds["blank_next"] = {}
-    new_echo_held = {}
-    if regridded:
+    new_echo_held, agree_summary, near_vetoed, kkl_night_held, ghats_summary = {}, {}, {}, {}, {}
+    _audit_rows = []
+    _audit_snap = {p: g.copy() for p, g in regridded.items()}
+
+    def _step(name, fn):
+        nonlocal _audit_snap
+        if not regridded:
+            return {}
         try:
-            new_echo_held = _new_echo_hold(regridded, lat2d, lon2d)
+            out = fn()
         except Exception as ex:
-            print(f"[bot-export] new-echo check skipped ({ex!r})")
-    agree_summary = {}
-    if regridded:
+            print(f"[bot-export] {name} skipped ({ex!r})")
+            out = {}
         try:
-            agree_summary = _radar_agreement_hold(regridded, age_h, lat2d, lon2d, now_utc)
+            _audit_rows.extend(_audit_removed(name, _audit_snap, regridded, lat2d, lon2d))
         except Exception as ex:
-            print(f"[bot-export] radar agreement check skipped ({ex!r})")
-    near_vetoed = {}
-    if regridded:
-        try:
-            near_vetoed = _near_radar_veto(regridded, age_h, lat2d, lon2d)
-        except Exception as ex:
-            print(f"[bot-export] nearer-radar check skipped ({ex!r})")
-    kkl_night_held = {}
-    if regridded:
-        try:
-            kkl_night_held = _kkl_night_rain_hold(regridded, lat2d, lon2d, now_utc)
-        except Exception as ex:
-            print(f"[bot-export] night Karaikal check skipped ({ex!r})")
-    ghats_summary = {}
-    if regridded:
-        try:
-            ghats_summary = _ghats_night_hold(regridded, lat2d, lon2d, now_utc)
-        except Exception as ex:
-            print(f"[bot-export] Ghats night rule skipped ({ex!r})")
+            print(f"[bot-export] audit of {name} failed ({ex!r})")
+        _audit_snap = {p: g.copy() for p, g in regridded.items()}
+        return out
+
+    new_echo_held = _step("new echo (seen once)", lambda: _new_echo_hold(regridded, lat2d, lon2d))
+    agree_summary = _step("radar not trusted", lambda: _radar_agreement_hold(regridded, age_h, lat2d, lon2d, now_utc))
+    near_vetoed = _step("nearer radar dry", lambda: _near_radar_veto(regridded, age_h, lat2d, lon2d))
+    kkl_night_held = _step("Karaikal no satellite support", lambda: _kkl_night_rain_hold(regridded, lat2d, lon2d, now_utc))
+    ghats_summary = _step("Ghats hill echo", lambda: _ghats_night_hold(regridded, lat2d, lon2d, now_utc))
     sri_summary = _bot_sri_cap(regridded, age_h, lat2d, lon2d, now_utc) if regridded else {}
+    try:
+        _audit_rows.extend(_audit_removed("SRI surface rain", _audit_snap, regridded, lat2d, lon2d))
+        _write_audit(now_utc, _audit_rows)
+    except Exception as ex:
+        print(f"[bot-export] audit not written ({ex!r})")
     sri_summary["ghats_night"] = ghats_summary
     sri_summary["radar_agreement"] = agree_summary
     sri_summary["new_echo_held"] = new_echo_held
