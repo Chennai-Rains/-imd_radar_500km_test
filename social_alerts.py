@@ -85,6 +85,8 @@ MIN_REGION_COVERAGE = 0.5  # share of a region inside radar coverage; no coverag
 # 21 Oct 2026 (user): alerts should WARN. 83 % of "over" mentions (15-20 Oct) were repeats of rain already announced, so
 # continuing rain no longer triggers a post by itself; it is carried as "continuing over ..." when a post goes out for a
 # new reason (a district newly approaching, rain newly starting over a district, or a step up to Heavy).
+NEW_STORM_AFTER_MIN = 60   # an announced district can be alerted again for a different storm after this long
+NEW_STORM_KM = 30.0        # ... when the rain affecting it is centred this far from where it was when announced
 RIDE_MAX_WAIT_MIN = 20     # a district riding along on an already-announced unit gets its own post after this long
 CLEAR_AFTER_MIN = 60       # a region must be quiet this long before rain there is a NEW episode (was 30: pauses re-announced the same rain)
 DISTRICT_MIN_GAP_MIN = 60  # a district already announced is upgraded (Moderate -> Heavy) at most once an hour ...
@@ -559,7 +561,7 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
     if not hits:
         return "skip", "no strong echo over or heading for any region", set()
 
-    changed = set()
+    changed, new_storm = set(), set()
     warn, new, upgraded, vh, grouped, held_weak, held_tiny = [], [], [], [], [], [], []
     for h in hits:
         st = regs[h.name]
@@ -583,6 +585,16 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
             if rank == 3 and vh_exception:
                 vh.append(h.name)
             continue
+        # 23 Nov 2026 (Srikanth, 5:54 PM: storm ~30 km east of Chennai, no alert; last X post 12:26 PM): Chennai stayed
+        # "announced" all afternoon because some echo was always in range, so a NEW storm heading in never triggered.
+        # A district announced >= NEW_STORM_AFTER_MIN ago counts as new again when the rain now affecting it is centred
+        # more than NEW_STORM_KM from where it was when announced.
+        if (st.get("last_lat") is not None and _mins(now_utc, _dt(st.get("last_post"))) >= NEW_STORM_AFTER_MIN
+                and haversine_km(h.lat, h.lon, st["last_lat"], st["last_lon"]) > NEW_STORM_KM
+                and not weak_far(h)):
+            changed.add(h.name); new_storm.add(h.name)
+            (warn if h.status == "approaching" and h.lead_min >= IMMINENT_MIN else new).append(h.name)
+            continue
         if rank == 3 and st.get("last_rank", 0) < 3 and vh_exception:       # turned Very heavy: never held back
             upgraded.append(h.name); changed.add(h.name); vh.append(h.name)
         elif rank > st.get("last_rank", 0) and _mins(now_utc, _dt(st.get("last_post"))) >= district_gap:
@@ -600,7 +612,7 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
     by_name = {h.name: h for h in hits}
     triggers = [n for n in changed
                 if not units[alert_unit(by_name[n])]["announced"] or category(by_name[n]) > units[alert_unit(by_name[n])]["rank"]
-                or n in vh]
+                or n in vh or n in new_storm]
     # 23 Nov 2026 (Srikanth: "After 3:11 there has been no radar alert"): Ranipet had new rain from 3:56 PM but its
     # 100 km alert unit was already announced, so it "rode along" -- and no other post came for 2 hours, so it was never
     # mentioned. A district may ride along for at most RIDE_MAX_WAIT_MIN; after that it triggers a post itself (the
