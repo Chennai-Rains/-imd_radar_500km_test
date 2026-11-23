@@ -85,6 +85,7 @@ MIN_REGION_COVERAGE = 0.5  # share of a region inside radar coverage; no coverag
 # 21 Oct 2026 (user): alerts should WARN. 83 % of "over" mentions (15-20 Oct) were repeats of rain already announced, so
 # continuing rain no longer triggers a post by itself; it is carried as "continuing over ..." when a post goes out for a
 # new reason (a district newly approaching, rain newly starting over a district, or a step up to Heavy).
+RIDE_MAX_WAIT_MIN = 20     # a district riding along on an already-announced unit gets its own post after this long
 CLEAR_AFTER_MIN = 60       # a region must be quiet this long before rain there is a NEW episode (was 30: pauses re-announced the same rain)
 DISTRICT_MIN_GAP_MIN = 60  # a district already announced is upgraded (Moderate -> Heavy) at most once an hour ...
 GLOBAL_MIN_GAP_MIN = 20    # minimum time between any two posts (was 30) ...
@@ -600,6 +601,18 @@ def decide(hits: list[Hit], state: dict, now_utc: datetime, global_gap: float = 
     triggers = [n for n in changed
                 if not units[alert_unit(by_name[n])]["announced"] or category(by_name[n]) > units[alert_unit(by_name[n])]["rank"]
                 or n in vh]
+    # 23 Nov 2026 (Srikanth: "After 3:11 there has been no radar alert"): Ranipet had new rain from 3:56 PM but its
+    # 100 km alert unit was already announced, so it "rode along" -- and no other post came for 2 hours, so it was never
+    # mentioned. A district may ride along for at most RIDE_MAX_WAIT_MIN; after that it triggers a post itself (the
+    # hourly cap and gaps still apply).
+    rs = state.setdefault("riding_since", {})
+    for n in list(rs):
+        if n not in changed:
+            del rs[n]
+    for n in changed - set(triggers):
+        rs.setdefault(n, now_utc.isoformat())
+        if _mins(now_utc, _dt(rs[n])) >= RIDE_MAX_WAIT_MIN:
+            triggers.append(n)
     riding = sorted(changed - set(triggers))
     if changed and not triggers:
         return "skip", f"same area already announced, riding along next time: {', '.join(riding)}", set()
