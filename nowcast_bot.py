@@ -5145,7 +5145,7 @@ def _district_of(lat2d, lon2d, mask) -> str:
         try:
             import social_alerts as _sa
             regs = _sa.build_district_regions(lat2d[:, 0], lon2d[0, :])
-            _district_cache[key] = [(r.name, r.rs, r.cs, r.mask) for r in regs if r.name != "Chennai"]
+            _district_cache[key] = [(r.name, r.rs, r.cs, r.sub) for r in regs if r.name != "Chennai"]
         except Exception:
             _district_cache[key] = []
     best, bn = "sea / outside TN", 0
