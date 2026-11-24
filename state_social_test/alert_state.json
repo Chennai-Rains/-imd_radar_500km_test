@@ -1,7 +1,7 @@
 {
  "regions": {
   "Tiruvannamalai": {
-   "active": true,
+   "active": false,
    "last_post": "2026-11-24T00:41:39.698223+00:00",
    "last_status": "over",
    "last_rank": 1,
@@ -136,7 +136,7 @@
    "last_lon": 78.025
   },
   "Ranipet": {
-   "active": true,
+   "active": false,
    "last_post": "2026-11-24T00:41:39.698223+00:00",
    "last_status": "approaching",
    "last_rank": 1,
@@ -248,7 +248,7 @@
    "last_post": "2026-11-24T00:02:25.056378+00:00",
    "last_status": "over",
    "last_rank": 1,
-   "last_hit": "2026-11-24T02:06:24.251790+00:00",
+   "last_hit": "2026-11-24T02:11:39.074168+00:00",
    "last_lat": 12.94,
    "last_lon": 80.097
   },
@@ -266,12 +266,12 @@
    "last_post": "2026-11-24T00:02:25.056378+00:00",
    "last_status": "approaching",
    "last_rank": 1,
-   "last_hit": "2026-11-24T00:11:54.629031+00:00",
+   "last_hit": "2026-11-24T02:11:39.074168+00:00",
    "last_lat": 10.693,
    "last_lon": 79.823
   },
   "Kancheepuram": {
-   "active": true,
+   "active": false,
    "last_post": "2026-11-24T00:41:39.698223+00:00",
    "last_status": "over",
    "last_rank": 1,
@@ -384,13 +384,14 @@
   "2026-11-24": 4
  },
  "weak_seen": {
-  "t": "2026-11-24T02:06:24.251790+00:00",
+  "t": "2026-11-24T02:11:39.074168+00:00",
   "names": [
-   "Chengalpattu"
+   "Chengalpattu",
+   "Nagapattinam"
   ]
  },
  "vh_seen": {
-  "t": "2026-11-24T02:06:24.251790+00:00",
+  "t": "2026-11-24T02:11:39.074168+00:00",
   "names": []
  },
  "post_times": [
@@ -436,30 +437,29 @@
   ]
  },
  "heavy_seen": {
-  "t": "2026-11-24T02:06:24.251790+00:00",
+  "t": "2026-11-24T02:11:39.074168+00:00",
   "names": []
  },
  "tiny_first": {
   "Chengalpattu": {
    "first": "2026-11-24T01:46:38.855004+00:00",
-   "last": "2026-11-24T02:06:24.251790+00:00"
+   "last": "2026-11-24T02:11:39.074168+00:00"
+  },
+  "Nagapattinam": {
+   "first": "2026-11-24T02:11:39.074168+00:00",
+   "last": "2026-11-24T02:11:39.074168+00:00"
   }
  },
  "units": {
   "Chengalpattu": {
    "rank": 2,
    "announced": true,
-   "last_hit": "2026-11-24T02:06:24.251790+00:00"
+   "last_hit": "2026-11-24T02:11:39.074168+00:00"
   },
-  "Kancheepuram": {
-   "rank": 1,
-   "announced": true,
-   "last_hit": "2026-11-24T01:11:37.092295+00:00"
-  },
-  "grid 5,3": {
-   "rank": 1,
-   "announced": true,
-   "last_hit": "2026-11-24T01:11:37.092295+00:00"
+  "grid 2,3": {
+   "rank": 0,
+   "announced": false,
+   "last_hit": "2026-11-24T02:11:39.074168+00:00"
   }
  },
  "riding_since": {}
