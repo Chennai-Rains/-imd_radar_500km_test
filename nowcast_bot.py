@@ -5194,6 +5194,35 @@ def _write_audit(now_utc: datetime, rows: list) -> None:
         print("[audit] held: " + "; ".join(f"{d} {n} ({c})" for (c, d), n in sorted(by.items(), key=lambda x: -x[1])[:12]))
 
 
+# ---- NIOT alone: small storms can't be Heavy ----
+# 25 Nov 2026 (Srikanth: "Let's keep a check for NIOT"): Chennai DWR sent nothing from 2:50 AM; at 12:41 PM a 9-node
+# NIOT X-band cell near Tambaram peaked 59 dBZ and went out as Kancheepuram / Chennai Heavy. The NIOT cap (reference
+# +5 dB) needs a fresh Chennai frame, so nothing checked it. While no fresh Chennai DWR frame is available, a NIOT storm
+# (connected >= 35 dBZ) smaller than NIOT_ALONE_HEAVY_MIN_NODES is held at Moderate (44 dBZ).
+NIOT_ALONE_HEAVY_MIN_NODES: int = 20
+NIOT_REFERENCE_PRODUCTS: tuple = ("cni_maxz", "cni_ppi")
+
+
+def _niot_alone_cap(regridded: dict, age_h: dict) -> dict:
+    g = regridded.get("maxz")
+    if g is None:
+        return {}
+    if any(p in regridded and age_h.get(p, 9) * 60.0 <= AGREE_MAX_AGE_MIN for p in NIOT_REFERENCE_PRODUCTS):
+        return {}
+    strong = np.isfinite(g) & (g >= 35.0)
+    lab, n = ndimage.label(strong, structure=np.ones((3, 3)))
+    if not n:
+        return {}
+    sizes = ndimage.sum(strong, lab, index=np.arange(1, n + 1))
+    small = np.isin(lab, np.arange(1, n + 1)[sizes < NIOT_ALONE_HEAVY_MIN_NODES])
+    cap = small & (g > BOT_SRI_CAP_DBZ)
+    if not cap.any():
+        return {}
+    regridded["maxz"] = np.where(cap, BOT_SRI_CAP_DBZ, g)
+    print(f"[bot-export] NIOT alone (no fresh Chennai DWR): {int(cap.sum())} nodes of small storms held at Moderate")
+    return {"maxz": int(cap.sum())}
+
+
 def _new_echo_hold(regridded: dict, lat2d: np.ndarray, lon2d: np.ndarray) -> dict:
     held = {}
     k = 2 * max(1, int(round(NEW_ECHO_NEAR_KM / (BOT_GRID_STEP_DEG * 111.0)))) + 1
@@ -5548,6 +5577,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     near_vetoed = _step("nearer radar dry", lambda: _near_radar_veto(regridded, age_h, lat2d, lon2d))
     kkl_night_held = _step("Karaikal no satellite support", lambda: _kkl_night_rain_hold(regridded, lat2d, lon2d, now_utc))
     ghats_summary = _step("Ghats hill echo", lambda: _ghats_night_hold(regridded, lat2d, lon2d, now_utc))
+    niot_alone = _step("NIOT alone, small storm", lambda: _niot_alone_cap(regridded, age_h))
     sri_summary = _bot_sri_cap(regridded, age_h, lat2d, lon2d, now_utc) if regridded else {}
     try:
         _audit_rows.extend(_audit_removed("SRI surface rain", _audit_snap, regridded, lat2d, lon2d))
@@ -5559,6 +5589,7 @@ def export_bot_data(products: tuple | None = None, now_utc: datetime | None = No
     sri_summary["new_echo_held"] = new_echo_held
     sri_summary["kkl_night_rain_held"] = kkl_night_held
     sri_summary["near_radar_vetoed"] = near_vetoed
+    sri_summary["niot_alone_capped"] = niot_alone
     # 13 Nov 2026 (Srikanth: "update the live map as well with the same conditions we are following for the alerts"):
     # hand the map what the checks above changed -- per product, the strength each held node was capped at -- and
     # which radars are not trusted right now. build_forecast_map (run after this) draws with them.
